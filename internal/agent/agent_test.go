@@ -690,6 +690,34 @@ func TestAReleaseAlreadyRunningSucceedsWithoutReinstalling(t *testing.T) {
 	}
 }
 
+func TestAReleaseAlreadyRunningWaitsOutAPause(t *testing.T) {
+	f := newFixture(t)
+	f.runToIdle()
+	f.server.reports = nil
+
+	second := assignmentFor(f.server.manifest)
+	second.ID = "assignment-2"
+	second.RolloutID = "rollout-2"
+	f.server.assignment = second
+	f.server.paused = true
+	for range 5 {
+		f.clock.now = f.clock.now.Add(2 * testPoll)
+		f.step()
+	}
+	// Confirming it would start an in-flight step, which a pause refuses, so it waits.
+	if len(f.server.reports) != 0 {
+		t.Fatalf("reported %v during the pause", f.server.states())
+	}
+
+	f.server.paused = false
+	f.clock.now = f.clock.now.Add(2 * testPoll)
+	f.runUntil("the follow-up is reported", func() bool { return f.server.assignment == nil && f.isIdle() })
+	want := []rollout.AssignmentState{rollout.AssignmentHealthCheck, rollout.AssignmentSucceeded}
+	if got := f.server.states(); !slices.Equal(got, want) {
+		t.Fatalf("reports = %v, want %v", got, want)
+	}
+}
+
 func TestAnUnhealthyReleaseIsRevertedAndReported(t *testing.T) {
 	f := newFixture(t)
 	f.installer.FailHealth(errors.New("service won't start"))

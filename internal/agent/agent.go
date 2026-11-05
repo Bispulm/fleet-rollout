@@ -556,7 +556,11 @@ func (a *Agent) startWork(assignment apiv1.DeviceAssignment) error {
 		return reject(ReasonTooLarge)
 	case artifact.ReleaseCounter == a.cp.Active.Release && artifact.SHA256 == a.cp.Active.SHA256:
 		// It already runs this exact release, which can happen when an install from an earlier
-		// rollout finishes after a follow-up froze its membership.
+		// rollout finishes after a follow-up froze its membership. Confirming that is a step
+		// into flight, which a hold refuses, so it waits to be released first.
+		if assignment.Directive == rollout.DirectiveHold {
+			return nil
+		}
 		next.enqueue(assignment.RolloutID, assignment.ID, assignment.Generation, rollout.AssignmentHealthCheck, "")
 		next.enqueue(assignment.RolloutID, assignment.ID, assignment.Generation, rollout.AssignmentSucceeded, "")
 		return a.commit(next)
