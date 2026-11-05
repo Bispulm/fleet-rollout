@@ -57,11 +57,20 @@ func Presets() []string {
 // Preset returns a named scenario: a four-stage rollout of the given number of devices that
 // halts when more than 10% of a stage fails, with soak as each stage's soak time.
 func Preset(name string, seed int64, devices int, soak time.Duration) (Scenario, error) {
+	faults, err := PresetFaults(name, soak)
+	if err != nil {
+		return Scenario{}, err
+	}
+	return Scenario{Name: name, Seed: seed, Devices: devices, Policy: StagedPolicy(soak, 1000), Faults: faults}, nil
+}
+
+// PresetFaults returns just a preset's faults, with timings scaled to the soak time.
+func PresetFaults(name string, soak time.Duration) (Faults, error) {
 	faults, ok := presets[name]
 	if !ok {
-		return Scenario{}, fmt.Errorf("unknown preset %q; choose from %s", name, strings.Join(Presets(), ", "))
+		return Faults{}, fmt.Errorf("unknown preset %q; choose from %s", name, strings.Join(Presets(), ", "))
 	}
-	return Scenario{Name: name, Seed: seed, Devices: devices, Policy: StagedPolicy(soak, 1000), Faults: faults(soak)}, nil
+	return faults(soak), nil
 }
 
 // StagedPolicy rolls out to 10%, 25%, 50%, and then everyone, soaking each stage, and halts

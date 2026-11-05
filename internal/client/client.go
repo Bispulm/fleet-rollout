@@ -240,6 +240,20 @@ func (c *Client) CreateArtifact(ctx context.Context, envelope signing.Envelope) 
 	return out, err
 }
 
+// FindArtifact returns the artifact with this name, platform, and version, and whether
+// there is one.
+func (c *Client) FindArtifact(ctx context.Context, name, platform, version string) (apiv1.Artifact, bool, error) {
+	var out apiv1.ArtifactList
+	query := url.Values{"name": {name}, "platform": {platform}, "version": {version}}
+	if err := c.do(ctx, http.MethodGet, "/v1/artifacts", query, nil, &out); err != nil {
+		return apiv1.Artifact{}, false, err
+	}
+	if len(out.Artifacts) == 0 {
+		return apiv1.Artifact{}, false, nil
+	}
+	return out.Artifacts[0], true, nil
+}
+
 // UploadArtifactContent sends an artifact's bytes. There's no deadline here beyond ctx, because
 // how long this takes depends on the artifact's size.
 func (c *Client) UploadArtifactContent(ctx context.Context, id string, content io.Reader, size int64) error {

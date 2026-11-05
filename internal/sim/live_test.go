@@ -1,8 +1,10 @@
 package sim_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -12,9 +14,12 @@ import (
 	"time"
 
 	"github.com/Bispulm/fleet-rollout/internal/api"
+	"github.com/Bispulm/fleet-rollout/internal/apiv1"
 	"github.com/Bispulm/fleet-rollout/internal/artifactstore"
+	"github.com/Bispulm/fleet-rollout/internal/client"
 	"github.com/Bispulm/fleet-rollout/internal/engine"
 	"github.com/Bispulm/fleet-rollout/internal/rollout"
+	"github.com/Bispulm/fleet-rollout/internal/signing"
 	"github.com/Bispulm/fleet-rollout/internal/signing/signingtest"
 	"github.com/Bispulm/fleet-rollout/internal/sim"
 	"github.com/Bispulm/fleet-rollout/internal/store"
@@ -132,5 +137,79 @@ func TestALiveRunStopsAtItsDeadlineWhenStatusIsUnavailable(t *testing.T) {
 	}
 	if !report.TimedOut {
 		t.Fatalf("report = %+v, want it to have given up", report)
+	}
+}
+
+func TestASimulatedFleetCarriesOutARolloutStartedElsewhere(t *testing.T) {
+	url, signer := liveServer(t, nil)
+	admin := client.New(url, liveAdminToken, nil)
+	ctx := t.Context()
+	if _, err := admin.CreateFleet(ctx, apiv1.CreateFleetRequest{Name: "existing"}); err != nil {
+		t.Fatal(err)
+	}
+	specs := make([]apiv1.DeviceSpec, 8)
+	for i := range specs {
+		specs[i] = apiv1.DeviceSpec{ID: fmt.Sprintf("existing-%d", i), Platform: "linux/arm64"}
+	}
+	registered, err := admin.RegisterDevices(ctx, "existing", specs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	creds := make([]sim.Credential, len(registered))
+	for i, d := range registered {
+		creds[i] = sim.Credential{ID: d.ID, Token: d.Token}
+	}
+	content := bytes.Repeat([]byte("release one "), 1000)
+	_, envelope := signingtest.Signed(t, signer, signing.Meta{
+		Name: "demo-app", Version: "1.0.0", Platform: "linux/arm64", ReleaseCounter: 1, ChunkSize: 1024,
+	}, content)
+	artifact, err := admin.CreateArtifact(ctx, envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.UploadArtifactContent(ctx, artifact.ID, bytes.NewReader(content), int64(len(content))); err != nil {
+		t.Fatal(err)
+	}
+	created, err := admin.CreateRollout(ctx, "existing", apiv1.CreateRolloutRequest{
+		Name: "elsewhere", ArtifactID: artifact.ID, Policy: sim.StagedPolicy(time.Second, 1000),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.Transition(ctx, created.ID, client.ActionStart, apiv1.TransitionRequest{}); err != nil {
+		t.Fatal(err)
+	}
+
+	runCtx, stop := context.WithCancel(ctx)
+	type result struct {
+		report sim.FleetReport
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		report, err := sim.RunFleet(runCtx, sim.FleetConfig{
+			APIURL: url, Devices: creds, Trust: signingtest.Trust(t, signer), Platform: "linux/arm64", Seed: 1,
+		})
+		done <- result{report, err}
+	}()
+	deadline := time.Now().Add(90 * time.Second)
+	for {
+		got, err := admin.GetRollout(ctx, created.ID)
+		if err == nil && got.State == rollout.StateCompleted {
+			break
+		}
+		if time.Now().After(deadline) {
+			stop()
+			t.Fatalf("the rollout never completed: %+v, %v", got.State, err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	stop()
+	res := <-done
+	if res.err != nil {
+		t.Fatalf("RunFleet: %v", res.err)
+	}
+	if res.report.Devices != 8 || res.report.Releases[1] != 8 {
+		t.Fatalf("report = %+v, want all 8 devices on release 1", res.report)
 	}
 }

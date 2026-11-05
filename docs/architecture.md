@@ -134,8 +134,8 @@ flowchart LR
 ```
 
 - **Agent.** Polls with jitter ([ADR 0002](adr/0002-pull-based-device-model.md)), resumes downloads from verified data, and persists a checkpoint at each step, so a crash during installation is recoverable. It starts installing only once the server accepts its request ([ADR 0009](adr/0009-installs-need-the-servers-agreement.md)), so the server always knows who is in flight.
-- **Simulator.** Runs the same agent state machine, replacing only transport, installation, and time.
-- **Operator.** Calls the same API as the CLI and holds no rollout rules of its own.
+- **Operator.** Turns `Fleet` and `Rollout` resources into calls to the same API as the CLI, and holds no rollout rules of its own ([ADR 0010](adr/0010-kubernetes-operator.md)). A `Rollout`'s UID is its rollout's ID, so creating one is idempotent.
+- **Simulator.** Runs the same agent, replacing only transport, installation, storage, and time. `rollout-sim fleet` runs real agents for devices that are already registered, so a rollout started by the operator or the CLI has devices to carry it out.
 
 Rollback semantics are specified in [rollout-semantics.md](rollout-semantics.md), along with everything
 that's already built.

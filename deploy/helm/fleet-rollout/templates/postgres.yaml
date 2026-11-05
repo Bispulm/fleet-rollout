@@ -1,0 +1,79 @@
+{{- if and .Values.postgres.enabled (not .Values.database.url) (not .Values.database.existingSecret) }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "fleet-rollout.name" . }}-postgres
+  labels:
+    {{- include "fleet-rollout.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  password: {{ .Values.postgres.password | quote }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "fleet-rollout.name" . }}-postgres
+  labels:
+    {{- include "fleet-rollout.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "fleet-rollout.selector" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+  ports:
+    - name: postgres
+      port: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "fleet-rollout.name" . }}-postgres
+  labels:
+    {{- include "fleet-rollout.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+spec:
+  serviceName: {{ include "fleet-rollout.name" . }}-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "fleet-rollout.selector" . | nindent 6 }}
+      app.kubernetes.io/component: postgres
+  template:
+    metadata:
+      labels:
+        {{- include "fleet-rollout.selector" . | nindent 8 }}
+        app.kubernetes.io/component: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: {{ .Values.postgres.image }}
+          env:
+            - name: POSTGRES_USER
+              value: rollout
+            - name: POSTGRES_DB
+              value: rollout
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fleet-rollout.name" . }}-postgres
+                  key: password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - name: postgres
+              containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "rollout", "-d", "rollout"]
+            periodSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ .Values.postgres.storage }}
+{{- end }}

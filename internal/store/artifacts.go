@@ -119,3 +119,18 @@ func readArtifact(ctx context.Context, q querier, id string) (Artifact, error) {
 	}
 	return out, nil
 }
+
+// FindArtifact returns the artifact with this name, platform, and version, which together
+// identify at most one.
+func (s *Store) FindArtifact(ctx context.Context, name, platform, version string) (Artifact, error) {
+	var id string
+	err := s.pool.QueryRow(ctx, `SELECT id FROM artifacts WHERE name = $1 AND platform = $2 AND version = $3`,
+		name, platform, version).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Artifact{}, notFound("artifact", name+" "+version+" for "+platform)
+	}
+	if err != nil {
+		return Artifact{}, fmt.Errorf("find artifact: %w", err)
+	}
+	return readArtifact(ctx, s.pool, id)
+}

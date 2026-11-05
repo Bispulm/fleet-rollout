@@ -1,0 +1,49 @@
+# The image holds every binary. Build it with `docker build -t fleet-rollout:dev .`.
+image:
+  repository: fleet-rollout
+  tag: dev
+  pullPolicy: IfNotPresent
+
+# The admin token for rolloutd's API, which the operator uses too. Give a value, or the name of
+# an existing Secret with the token under the key `admin-token`.
+adminToken:
+  value: ""
+  existingSecret: ""
+
+# Public keys trusted to sign artifacts, in PEM. Required.
+trustKeys: ""
+
+# Where rolloutd keeps its state. Give a URL, or the name of an existing Secret with it under the
+# key `database-url`. Leave both empty to use the bundled Postgres below.
+database:
+  url: ""
+  existingSecret: ""
+
+# A single-instance Postgres, for trying the chart out. Not for production.
+postgres:
+  enabled: true
+  image: postgres:18-alpine
+  # Required when enabled.
+  password: ""
+  storage: 1Gi
+
+rolloutd:
+  replicas: 1
+  # Artifact bytes live on this volume. It's ReadWriteOnce, so keep one replica unless the
+  # storage class allows sharing it.
+  artifactStorage: 1Gi
+  pollInterval: 60s
+  engineInterval: 5s
+  maxDeviceRequests: 256
+  maxDeviceDownloads: 128
+  logLevel: info
+  service:
+    type: ClusterIP
+    port: 18100
+  resources: {}
+
+operator:
+  enabled: true
+  replicas: 1
+  logLevel: info
+  resources: {}

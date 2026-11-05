@@ -453,27 +453,14 @@ func RunLive(ctx context.Context, cfg LiveConfig) (Report, error) {
 		live:      true,
 	}
 	devices := make([]*device, len(setup.tokens))
+	for i, registered := range setup.tokens {
+		devices[i] = newDevice(env, registered.ID, registered.Token, sc.Seed)
+	}
 	quiet := make([]atomic.Bool, len(devices))
 	runCtx, stop := context.WithCancel(ctx)
 	defer stop()
 	var wg sync.WaitGroup
-	for i, registered := range setup.tokens {
-		d := newDevice(env, registered.ID, registered.Token, sc.Seed)
-		devices[i] = d
-		wg.Go(func() {
-			// Devices don't all start at the same instant.
-			wait := time.Duration(env.decide.value(d.id, "start", 0) * float64(time.Second))
-			for {
-				select {
-				case <-runCtx.Done():
-					return
-				case <-time.After(wait):
-				}
-				wait = d.step(runCtx)
-				quiet[i].Store(d.quiet())
-			}
-		})
-	}
+	runDevices(runCtx, &wg, devices, quiet)
 
 	report := Report{Mode: "live", Scenario: sc, RolloutID: setup.rolloutID}
 	deadline := time.Now().Add(sc.MaxDuration)
@@ -512,5 +499,119 @@ func RunLive(ctx context.Context, cfg LiveConfig) (Report, error) {
 	wg.Wait()
 	report.Elapsed = time.Since(env.start)
 	summarize(&report, status, devices, setup.content)
+	return report, nil
+}
+
+// runDevices runs each device on its own goroutine, in real time, until ctx ends. quiet records
+// which have nothing in progress and nothing left to report.
+func runDevices(ctx context.Context, wg *sync.WaitGroup, devices []*device, quiet []atomic.Bool) {
+	for i, d := range devices {
+		wg.Go(func() {
+			// Devices don't all start at the same instant.
+			wait := time.Duration(d.env.decide.value(d.id, "start", 0) * float64(time.Second))
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(wait):
+				}
+				wait = d.step(ctx)
+				quiet[i].Store(d.quiet())
+			}
+		})
+	}
+}
+
+// Credential is a device that's already registered, and its token.
+type Credential struct {
+	ID    string
+	Token string
+}
+
+// FleetConfig describes simulated devices for a fleet that already exists, so that a rollout
+// started some other way, by rolloutctl or the Kubernetes operator, has devices to act on.
+type FleetConfig struct {
+	APIURL  string
+	Devices []Credential
+	// Trust is who the devices trust to sign releases.
+	Trust signing.TrustSet
+	// Platform and InitialRelease describe what the devices are running.
+	Platform       string
+	InitialRelease int64
+	Seed           int64
+	Faults         Faults
+	// Duration stops the run after this long. Without it, the run lasts until its context ends.
+	Duration time.Duration
+}
+
+// FleetReport says how the devices ended.
+type FleetReport struct {
+	Devices int `json:"devices"`
+	// Releases counts the devices running each release.
+	Releases        map[int64]int  `json:"releases"`
+	Faults          map[string]int `json:"faults"`
+	Failures        map[string]int `json:"failures"`
+	Crashes         int            `json:"crashes"`
+	BytesDownloaded int64          `json:"bytes_downloaded"`
+	Elapsed         time.Duration  `json:"elapsed"`
+}
+
+// RunFleet runs a real agent for each device, with faults injected, until ctx ends or the
+// duration passes. Ending is the normal way to stop it, so that isn't an error.
+func RunFleet(ctx context.Context, cfg FleetConfig) (FleetReport, error) {
+	if len(cfg.Devices) == 0 {
+		return FleetReport{}, errors.New("no devices to simulate")
+	}
+	faults := cfg.Faults
+	if faults.RestartWithin == 0 {
+		faults.RestartWithin = 2 * time.Minute
+	}
+	if faults.OfflineWithin == 0 {
+		faults.OfflineWithin = time.Hour
+	}
+	transport := &http.Transport{MaxIdleConnsPerHost: 64, MaxConnsPerHost: 64, IdleConnTimeout: 30 * time.Second}
+	defer transport.CloseIdleConnections()
+	env := &environment{
+		clock: realClock{}, decide: decider{seed: cfg.Seed}, faults: faults, start: time.Now(),
+		config:    agent.Config{Platform: cfg.Platform, Trust: cfg.Trust, InitialRelease: cfg.InitialRelease},
+		logger:    slog.New(slog.DiscardHandler),
+		transport: transport,
+		baseURL:   cfg.APIURL,
+		live:      true,
+	}
+	devices := make([]*device, len(cfg.Devices))
+	for i, c := range cfg.Devices {
+		devices[i] = newDevice(env, c.ID, c.Token, cfg.Seed)
+	}
+
+	runCtx, stop := context.WithCancel(ctx)
+	if cfg.Duration > 0 {
+		runCtx, stop = context.WithTimeout(ctx, cfg.Duration)
+	}
+	defer stop()
+	var wg sync.WaitGroup
+	runDevices(runCtx, &wg, devices, make([]atomic.Bool, len(devices)))
+	<-runCtx.Done()
+	wg.Wait()
+
+	report := FleetReport{
+		Devices: len(devices), Releases: map[int64]int{}, Faults: map[string]int{}, Failures: map[string]int{},
+		Elapsed: time.Since(env.start),
+	}
+	for _, d := range devices {
+		cp, _, err := d.checkpoints.Load()
+		if err != nil {
+			return FleetReport{}, err
+		}
+		report.Releases[cp.Active.Release]++
+		for kind, count := range d.faults {
+			report.Faults[kind] += count
+		}
+		for _, reason := range d.failures {
+			report.Failures[reason]++
+		}
+		report.Crashes += d.crashes
+		report.BytesDownloaded += d.bytes
+	}
 	return report, nil
 }

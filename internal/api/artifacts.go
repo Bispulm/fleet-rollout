@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Bispulm/fleet-rollout/internal/apiv1"
+	"github.com/Bispulm/fleet-rollout/internal/rollout"
 	"github.com/Bispulm/fleet-rollout/internal/signing"
 	"github.com/Bispulm/fleet-rollout/internal/store"
 )
@@ -62,6 +63,32 @@ func (s *Server) handleCreateArtifact(w http.ResponseWriter, r *http.Request) er
 		status = http.StatusCreated
 	}
 	writeJSON(w, status, artifactDocument(registered))
+	return nil
+}
+
+// handleFindArtifacts finds the artifact with a name, platform, and version, which together
+// identify at most one. The result is a list, so that finding nothing isn't an error.
+func (s *Server) handleFindArtifacts(w http.ResponseWriter, r *http.Request) error {
+	q := r.URL.Query()
+	name, platform, version := q.Get("name"), q.Get("platform"), q.Get("version")
+	switch {
+	case !rollout.ValidName(name):
+		return invalid("name", "required, as lowercase letters, digits, and hyphens")
+	case !rollout.ValidPlatform(platform):
+		return invalid("platform", "required, in the form os/arch")
+	case !rollout.ValidVersion(version):
+		return invalid("version", "required, as letters, digits, '.', '_', '+', and '-'")
+	}
+	out := apiv1.ArtifactList{Artifacts: []apiv1.Artifact{}}
+	artifact, err := s.store.FindArtifact(r.Context(), name, platform, version)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+	case err != nil:
+		return err
+	default:
+		out.Artifacts = append(out.Artifacts, artifactDocument(artifact))
+	}
+	writeJSON(w, http.StatusOK, out)
 	return nil
 }
 

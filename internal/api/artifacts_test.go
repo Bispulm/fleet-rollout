@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -354,5 +355,35 @@ func TestPausedDevicesKeepAccessButFinishedOnesDoNot(t *testing.T) {
 	}
 	if resp, _ := f.deviceGet(f.first, path, "bytes=0-9", ""); resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("after finishing: status = %d", resp.StatusCode)
+	}
+}
+
+func TestArtifactsCanBeFoundByNamePlatformAndVersion(t *testing.T) {
+	h := newHarness(t)
+	a := h.createArtifact()
+	query := url.Values{"name": {a.Name}, "platform": {a.Platform}, "version": {a.Version}}
+
+	var found apiv1.ArtifactList
+	h.expect(http.StatusOK, http.MethodGet, "/v1/artifacts?"+query.Encode(), nil, &found)
+	if len(found.Artifacts) != 1 || found.Artifacts[0].ID != a.ID {
+		t.Fatalf("found = %+v, want %s", found, a.ID)
+	}
+	query.Set("version", "9.9.9")
+	h.expect(http.StatusOK, http.MethodGet, "/v1/artifacts?"+query.Encode(), nil, &found)
+	if len(found.Artifacts) != 0 {
+		t.Fatalf("found = %+v for a version that doesn't exist", found)
+	}
+
+	for name, q := range map[string]url.Values{
+		"no name":      {"platform": {a.Platform}, "version": {a.Version}},
+		"bad platform": {"name": {a.Name}, "platform": {"arm64"}, "version": {a.Version}},
+		"no version":   {"name": {a.Name}, "platform": {a.Platform}},
+	} {
+		if status, raw := h.do(http.MethodGet, "/v1/artifacts?"+q.Encode(), nil); status != http.StatusUnprocessableEntity {
+			t.Errorf("%s: status = %d, body: %s", name, status, raw)
+		}
+	}
+	if status, _ := h.doWithAuth("", http.MethodGet, "/v1/artifacts?"+query.Encode(), nil); status != http.StatusUnauthorized {
+		t.Errorf("without a token: status = %d", status)
 	}
 }

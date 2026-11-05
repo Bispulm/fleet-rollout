@@ -105,6 +105,11 @@ type Artifact struct {
 	CreatedAt      time.Time `json:"created_at"`
 }
 
+// ArtifactList is the result of finding artifacts.
+type ArtifactList struct {
+	Artifacts []Artifact `json:"artifacts"`
+}
+
 // CreateRolloutRequest is the body of POST /v1/fleets/{fleet}/rollouts. ID is
 // optional. Supplying it makes the cohort reproducible across databases.
 type CreateRolloutRequest struct {

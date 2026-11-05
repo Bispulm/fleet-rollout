@@ -1,0 +1,141 @@
+{{- define "fleet-rollout.rolloutdEnv" -}}
+- name: ROLLOUTD_LISTEN_ADDR
+  value: "0.0.0.0:{{ .Values.rolloutd.service.port }}"
+# TLS ends at the cluster's ingress or service mesh, not in rolloutd.
+- name: ROLLOUTD_ALLOW_NON_LOOPBACK
+  value: "true"
+- name: ROLLOUTD_DATABASE_URL
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "fleet-rollout.databaseSecret" . }}
+      key: database-url
+- name: ROLLOUTD_ADMIN_TOKEN
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "fleet-rollout.adminTokenSecret" . }}
+      key: admin-token
+- name: ROLLOUTD_TRUST_KEYS_FILE
+  value: /etc/fleet-rollout/trust.pem
+- name: ROLLOUTD_ARTIFACT_DIR
+  value: /var/lib/fleet-rollout/artifacts
+- name: ROLLOUTD_POLL_INTERVAL
+  value: {{ .Values.rolloutd.pollInterval | quote }}
+- name: ROLLOUTD_ENGINE_INTERVAL
+  value: {{ .Values.rolloutd.engineInterval | quote }}
+- name: ROLLOUTD_MAX_DEVICE_REQUESTS
+  value: {{ .Values.rolloutd.maxDeviceRequests | quote }}
+- name: ROLLOUTD_MAX_DEVICE_DOWNLOADS
+  value: {{ .Values.rolloutd.maxDeviceDownloads | quote }}
+- name: ROLLOUTD_LOG_LEVEL
+  value: {{ .Values.rolloutd.logLevel | quote }}
+{{- end -}}
+{{- define "fleet-rollout.rolloutdMounts" -}}
+- name: trust
+  mountPath: /etc/fleet-rollout
+  readOnly: true
+- name: artifacts
+  mountPath: /var/lib/fleet-rollout/artifacts
+{{- end -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "fleet-rollout.name" . }}-artifacts
+  labels:
+    {{- include "fleet-rollout.labels" . | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: {{ .Values.rolloutd.artifactStorage }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "fleet-rollout.name" . }}-rolloutd
+  labels:
+    {{- include "fleet-rollout.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.rolloutd.service.type }}
+  selector:
+    {{- include "fleet-rollout.selector" . | nindent 4 }}
+    app.kubernetes.io/component: rolloutd
+  ports:
+    - name: http
+      port: {{ .Values.rolloutd.service.port }}
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fleet-rollout.name" . }}-rolloutd
+  labels:
+    {{- include "fleet-rollout.labels" . | nindent 4 }}
+    app.kubernetes.io/component: rolloutd
+spec:
+  replicas: {{ .Values.rolloutd.replicas }}
+  # The artifact volume is ReadWriteOnce, so a new pod can't start alongside the old one when
+  # they land on different nodes.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "fleet-rollout.selector" . | nindent 6 }}
+      app.kubernetes.io/component: rolloutd
+  template:
+    metadata:
+      labels:
+        {{- include "fleet-rollout.selector" . | nindent 8 }}
+        app.kubernetes.io/component: rolloutd
+      annotations:
+        checksum/trust: {{ .Values.trustKeys | sha256sum }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      # Migrations hold a lock in Postgres, so replicas starting together take turns. Until the
+      # database is reachable, this fails and Kubernetes retries it.
+      initContainers:
+        - name: migrate
+          image: {{ include "fleet-rollout.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["rolloutd", "migrate"]
+          env:
+            {{- include "fleet-rollout.rolloutdEnv" . | nindent 12 }}
+          volumeMounts:
+            {{- include "fleet-rollout.rolloutdMounts" . | nindent 12 }}
+          securityContext:
+            {{- include "fleet-rollout.securityContext" . | nindent 12 }}
+      containers:
+        - name: rolloutd
+          image: {{ include "fleet-rollout.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["rolloutd", "serve"]
+          env:
+            {{- include "fleet-rollout.rolloutdEnv" . | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.rolloutd.service.port }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+          volumeMounts:
+            {{- include "fleet-rollout.rolloutdMounts" . | nindent 12 }}
+          securityContext:
+            {{- include "fleet-rollout.securityContext" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.rolloutd.resources | nindent 12 }}
+      volumes:
+        - name: trust
+          configMap:
+            name: {{ include "fleet-rollout.name" . }}-trust
+        - name: artifacts
+          persistentVolumeClaim:
+            claimName: {{ include "fleet-rollout.name" . }}-artifacts

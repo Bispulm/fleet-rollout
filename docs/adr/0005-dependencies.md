@@ -19,13 +19,15 @@ Use the standard library unless a dependency clearly earns its place.
 | HTTP routing | `net/http` | `ServeMux` handles methods and path values. |
 | Logging | `log/slog` | Structured logging is in the standard library. |
 | Integration tests | Plain `pgx` against a server from Compose or CI | `testcontainers-go` would add a large dependency tree to save a few lines, and the local container runtime needs extra configuration for it. |
+| Kubernetes operator | `controller-runtime` and the Kubernetes client libraries | Watches, caches, leader election, and status updates are what an operator is. They're imported only by the operator's packages, and the CRD types depend on `k8s.io/apimachinery` alone (ADR 0010). |
+| CRD and deep copy generation | `controller-gen`, pinned, run with `go run` | Writing CRD schemas and deep copy methods by hand drifts from the types. It isn't a module dependency. |
 
 Each test creates its own database through `internal/testdb`, so tests can run in parallel without
 sharing state.
 
 ## Consequences
 
-- The Kubernetes operator will bring in `controller-runtime` and its large dependency tree. That's
-  unavoidable for an operator, but it's a reason to keep operator code to its own package and binary.
+- The Kubernetes operator brings in `controller-runtime` and its large dependency tree. That's
+  unavoidable for an operator, so operator code stays in its own packages and binary.
 - Tests need a Postgres server to be running. `ROLLOUT_TEST_REQUIRE_DB=1` makes CI fail rather than
   skip if it's missing.

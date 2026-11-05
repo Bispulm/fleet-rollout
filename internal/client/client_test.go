@@ -243,3 +243,22 @@ func TestAManifestIsParsedStrictly(t *testing.T) {
 		})
 	}
 }
+
+func TestFindArtifactSaysWhetherThereIsOne(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("version") == "1.4.0" {
+			_, _ = io.WriteString(w, `{"artifacts":[{"id":"a1","name":"demo-app","version":"1.4.0"}]}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"artifacts":[]}`)
+	}))
+	defer srv.Close()
+	c := client.New(srv.URL, "token", nil)
+	if a, ok, err := c.FindArtifact(t.Context(), "demo-app", "linux/arm64", "1.4.0"); err != nil || !ok || a.ID != "a1" {
+		t.Fatalf("FindArtifact = %+v, %v, %v", a, ok, err)
+	}
+	if _, ok, err := c.FindArtifact(t.Context(), "demo-app", "linux/arm64", "2.0.0"); err != nil || ok {
+		t.Fatalf("FindArtifact for a missing version = %v, %v", ok, err)
+	}
+}

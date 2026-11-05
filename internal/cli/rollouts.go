@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -18,33 +17,6 @@ import (
 )
 
 const timeLayout = "2006-01-02 15:04:05Z07:00"
-
-var ratePattern = regexp.MustCompile(`^([0-9]+)(?:\.([0-9]{1,2}))?%$`)
-
-// ParseRate converts a percentage such as "2%" or "0.25%" to basis points. It
-// accepts at most two decimals, the precision basis points can represent exactly.
-func ParseRate(s string) (int, error) {
-	match := ratePattern.FindStringSubmatch(s)
-	if match == nil {
-		return 0, fmt.Errorf("%q is not a percentage such as 2%% or 0.25%%", s)
-	}
-	whole, err := strconv.Atoi(match[1])
-	if err != nil || whole > 100 {
-		return 0, fmt.Errorf("%q is above 100%%", s)
-	}
-	fraction := 0
-	if match[2] != "" {
-		fraction, err = strconv.Atoi((match[2] + "0")[:2])
-		if err != nil {
-			return 0, fmt.Errorf("%q is not a percentage: %w", s, err)
-		}
-	}
-	bps := whole*100 + fraction
-	if bps > rollout.FullBPS {
-		return 0, fmt.Errorf("%q is above 100%%", s)
-	}
-	return bps, nil
-}
 
 func formatBPS(bps int) string {
 	return fmt.Sprintf("%d.%02d%%", bps/100, bps%100)
@@ -183,7 +155,7 @@ func (f createFlags) request(cmd *cobra.Command) (apiv1.CreateRolloutRequest, er
 	}
 
 	safety := rollout.SafetySpec{OnBreach: rollout.OnBreach(f.onBreach)}
-	maxFailure, err := ParseRate(f.maxFailure)
+	maxFailure, err := rollout.ParseRate(f.maxFailure)
 	if err != nil {
 		return apiv1.CreateRolloutRequest{}, fmt.Errorf("--max-failure-rate: %w", err)
 	}
@@ -201,7 +173,7 @@ func (f createFlags) request(cmd *cobra.Command) (apiv1.CreateRolloutRequest, er
 		if !changed(rate.flag) {
 			continue
 		}
-		bps, err := ParseRate(rate.value)
+		bps, err := rollout.ParseRate(rate.value)
 		if err != nil {
 			return apiv1.CreateRolloutRequest{}, fmt.Errorf("--%s: %w", rate.flag, err)
 		}

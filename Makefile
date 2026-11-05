@@ -2,6 +2,7 @@
 
 DEV_DATABASE_URL ?= postgres://rollout:rollout_dev@127.0.0.1:15431/rollout?sslmode=disable
 TEST_DATABASE_URL ?= postgres://rollout:rollout_dev@127.0.0.1:15431/postgres?sslmode=disable
+CONTROLLER_GEN := go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.23.0
 
 .PHONY: help
 help: ## Show available targets
@@ -11,6 +12,11 @@ help: ## Show available targets
 build: ## Build all binaries into ./bin
 	go build -o bin/ ./cmd/...
 
+.PHONY: generate
+generate: ## Generate deep copy code and CRDs from api/
+	$(CONTROLLER_GEN) object paths=./api/...
+	$(CONTROLLER_GEN) crd paths=./api/... output:crd:artifacts:config=deploy/helm/fleet-rollout/crds
+
 .PHONY: test
 test: ## Run unit tests; database tests skip without a database
 	go test ./...
@@ -18,6 +24,10 @@ test: ## Run unit tests; database tests skip without a database
 .PHONY: test-integration
 test-integration: ## Run all tests with the race detector against local Postgres
 	ROLLOUT_TEST_DATABASE_URL='$(TEST_DATABASE_URL)' ROLLOUT_TEST_REQUIRE_DB=1 go test -race -count=1 ./...
+
+.PHONY: test-kind
+test-kind: ## Run rollouts end to end on a local kind cluster (deletes it after unless KEEP_CLUSTER=1)
+	test/kind/run.sh
 
 .PHONY: lint
 lint: ## Run golangci-lint
