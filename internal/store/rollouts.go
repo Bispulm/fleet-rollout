@@ -223,7 +223,11 @@ func (s *Store) GetRollout(ctx context.Context, id string) (Rollout, error) {
 	err := pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly},
 		func(tx pgx.Tx) error {
 			var err error
-			out, err = readRollout(ctx, tx, id, s.now())
+			if out, err = readRollout(ctx, tx, id, s.now()); err != nil {
+				return err
+			}
+			// Only people read these, so the engine's reads, which hold the rollout's lock, skip them.
+			out.FailureReasons, err = readFailureReasons(ctx, tx, id)
 			return err
 		})
 	if err != nil {
@@ -286,9 +290,6 @@ func readRollout(ctx context.Context, tx pgx.Tx, id string, now time.Time) (Roll
 		case rollout.StateRunning, rollout.StateSoaking, rollout.StatePaused:
 			r.Waiting = r.Policy.Evaluate(r.evaluation(now)).Waiting
 		}
-	}
-	if r.FailureReasons, err = readFailureReasons(ctx, tx, id); err != nil {
-		return Rollout{}, err
 	}
 	if rollbackAttempt > 0 {
 		if r.Rollback, err = readRollback(ctx, tx, id, rollbackAttempt, rollbackDeadline); err != nil {
@@ -420,15 +421,20 @@ func (s *Store) RecentRollouts(ctx context.Context, window time.Duration) ([]Rol
 	return out, err
 }
 
+// maxFailureReasons bounds how many reasons are listed. Reasons are whatever devices send, so the
+// rest are counted together as other.
+const maxFailureReasons = 10
+
 // readFailureReasons counts failed forward installs by the reason each device reported, from the
 // failure report the server applied.
 func readFailureReasons(ctx context.Context, tx pgx.Tx, id string) (map[string]int, error) {
 	rows, err := tx.Query(ctx, `
-		SELECT coalesce(nullif(e.payload->>'reason', ''), 'unspecified'), count(DISTINCT a.id)
+		SELECT coalesce(nullif(left(e.payload->>'reason', 64), ''), 'unspecified'), count(DISTINCT a.id)
 		FROM assignments a
 		JOIN device_events e ON e.assignment_id = a.id AND e.type = 'failed' AND e.applied
 		WHERE a.rollout_id = $1 AND a.kind = 'forward' AND a.state = 'failed'
-		GROUP BY 1`, id)
+		GROUP BY 1
+		ORDER BY 2 DESC, 1`, id)
 	if err != nil {
 		return nil, fmt.Errorf("query failure reasons: %w", err)
 	}
@@ -436,7 +442,11 @@ func readFailureReasons(ctx context.Context, tx pgx.Tx, id string) (map[string]i
 	var reason string
 	var count int
 	if _, err := pgx.ForEachRow(rows, []any{&reason, &count}, func() error {
-		out[reason] = count
+		if len(out) < maxFailureReasons {
+			out[reason] += count
+		} else {
+			out["other"] += count
+		}
 		return nil
 	}); err != nil {
 		return nil, fmt.Errorf("query failure reasons: %w", err)

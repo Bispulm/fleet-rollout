@@ -3,6 +3,8 @@ package store_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -424,5 +426,46 @@ func TestFailuresAreCountedByTheReasonDevicesGave(t *testing.T) {
 	}
 	if len(got.FailureReasons) != 2 || got.FailureReasons["unhealthy"] != 1 || got.FailureReasons["interrupted"] != 1 {
 		t.Fatalf("failure reasons = %v, want one of each", got.FailureReasons)
+	}
+}
+
+func TestFailureReasonsAreCappedSoDevicesCantFloodStatus(t *testing.T) {
+	s, ctx := newStore(t)
+	w := newWorld(t, ctx, s, 20)
+	input := w.newRollout(t, "demo")
+	input.Policy = mustPolicy(t, func(p *rollout.PolicySpec) { p.Stages = []rollout.StageSpec{{Percent: 100}} })
+	created, _, err := s.CreateRollout(ctx, "lab-a", input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := mustStart(t, s, created)
+	// Every device fails, each with a reason of its own, which is more than the cap.
+	var failed int
+	for position := 1; position <= 20; position++ {
+		device := memberAt(t, ctx, s, r.ID, position)
+		a := poll(t, ctx, s, device)
+		if a == nil {
+			continue
+		}
+		failure := reportFor(device, a, 1, rollout.AssignmentFailed)
+		failure.Reason = fmt.Sprintf("reason-%02d-%s", position, strings.Repeat("x", 100))
+		if _, err := s.RecordReport(ctx, failure); err != nil {
+			t.Fatal(err)
+		}
+		failed++
+	}
+	got, err := s.GetRollout(ctx, r.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	total := 0
+	for reason, n := range got.FailureReasons {
+		if len(reason) > 64 {
+			t.Errorf("reason %q is longer than 64 bytes", reason)
+		}
+		total += n
+	}
+	if failed != 20 || total != failed || len(got.FailureReasons) != 11 || got.FailureReasons["other"] != 10 {
+		t.Fatalf("%d reasons totaling %d, for %d failures", len(got.FailureReasons), total, failed)
 	}
 }
