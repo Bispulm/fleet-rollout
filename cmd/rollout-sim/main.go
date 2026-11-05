@@ -52,10 +52,11 @@ func runProcess() error {
 }
 
 const usage = `usage:
-  rollout-sim run  [flags]   deterministic, in process, in a scratch database
-  rollout-sim live [flags]   real time, against a running rolloutd
+  rollout-sim run   [flags]   deterministic, in process, in a scratch database
+  rollout-sim live  [flags]   real time, against a running rolloutd
+  rollout-sim fleet [flags]   real time, devices for a fleet that already exists
 
-Run "rollout-sim run -h" or "rollout-sim live -h" for flags.`
+Run "rollout-sim <command> -h" for flags.`
 
 func run(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
@@ -67,6 +68,8 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 		return runDeterministic(ctx, args[1:], getenv, stdout, stderr)
 	case "live":
 		return runLive(ctx, args[1:], getenv, stdout, stderr)
+	case "fleet":
+		return runFleet(ctx, args[1:], stdout, stderr)
 	case "-h", "--help", "help":
 		_, err := fmt.Fprintln(stdout, usage)
 		return err
@@ -264,6 +267,102 @@ func runLive(ctx context.Context, args []string, getenv func(string) string, std
 		return err
 	}
 	return printReport(stdout, report, *c.asJSON)
+}
+
+func runFleet(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("rollout-sim fleet", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	apiURL := flags.String("api", "http://127.0.0.1:18100", "rolloutd address")
+	tokensFile := flags.String("tokens-file", "", "device IDs and tokens, one pair per line, as rolloutctl writes them")
+	trustFile := flags.String("trust-keys", "", "public keys the devices trust to sign releases")
+	platform := flags.String("platform", "linux/arm64", "the devices' platform")
+	initialRelease := flags.Int64("initial-release", 0, "release counter the devices run before any update")
+	preset := flags.String("preset", "flaky", "faults: "+strings.Join(sim.Presets(), ", "))
+	soak := flags.Duration("soak", 15*time.Second, "scales the preset's outage and restart times")
+	seed := flags.Int64("seed", 1, "seed for every fault decision")
+	dropRate := flags.Float64("drop-rate", -1, "share of device requests that fail before reaching the server (default: the preset's)")
+	badRate := flags.Float64("bad-release-rate", -1, "share of devices on which releases fail their health check (default: the preset's)")
+	duration := flags.Duration("duration", 0, "stop after this long (default: run until interrupted)")
+	asJSON := flags.Bool("json", false, "print the report as JSON")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *tokensFile == "" || *trustFile == "" {
+		return errors.New("--tokens-file and --trust-keys are required")
+	}
+	faults, err := sim.PresetFaults(*preset, *soak)
+	if err != nil {
+		return err
+	}
+	for _, rate := range []struct {
+		name  string
+		value float64
+		dst   *float64
+	}{{"--drop-rate", *dropRate, &faults.Drop}, {"--bad-release-rate", *badRate, &faults.Unhealthy}} {
+		switch {
+		case rate.value < 0:
+		case rate.value > 1:
+			return fmt.Errorf("%s must be between 0 and 1", rate.name)
+		default:
+			*rate.dst = rate.value
+		}
+	}
+	devices, err := readTokens(*tokensFile)
+	if err != nil {
+		return err
+	}
+	keys, err := os.ReadFile(*trustFile)
+	if err != nil {
+		return fmt.Errorf("read trust keys: %w", err)
+	}
+	trust, err := signing.ParseTrustSet(keys)
+	if err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(stderr, "running %d devices; interrupt to stop\n", len(devices))
+	report, err := sim.RunFleet(ctx, sim.FleetConfig{
+		APIURL: *apiURL, Devices: devices, Trust: trust, Platform: *platform, InitialRelease: *initialRelease,
+		Seed: *seed, Faults: faults, Duration: *duration,
+	})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(report)
+	}
+	releases := make(map[string]int, len(report.Releases))
+	for release, count := range report.Releases {
+		releases[fmt.Sprintf("release %d", release)] = count
+	}
+	_, err = fmt.Fprintf(stdout, "%d devices after %s: %s\nfailures: %s\nfaults injected: %s; agent crashes %d\n",
+		report.Devices, report.Elapsed.Round(time.Second), counts(releases), counts(report.Failures),
+		counts(report.Faults), report.Crashes)
+	return err
+}
+
+// readTokens reads the device IDs and tokens rolloutctl writes, one pair per line.
+func readTokens(path string) ([]sim.Credential, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // The operator names the file.
+	if err != nil {
+		return nil, fmt.Errorf("read tokens: %w", err)
+	}
+	var out []sim.Credential
+	for i, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		switch {
+		case len(fields) == 0:
+		case len(fields) == 2:
+			out = append(out, sim.Credential{ID: fields[0], Token: fields[1]})
+		default:
+			return nil, fmt.Errorf("%s line %d: want a device ID and a token", path, i+1)
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("%s has no devices", path)
+	}
+	return out, nil
 }
 
 func trustFor(file string, signer ed25519.PrivateKey) (signing.TrustSet, error) {

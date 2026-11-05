@@ -24,6 +24,8 @@ func TestArgumentsAreChecked(t *testing.T) {
 		"drop rate over 1": {"run", "--drop-rate", "1.5", "--database-url", "postgres://x"},
 		"bad rate over 1":  {"run", "--bad-release-rate", "2", "--database-url", "postgres://x"},
 		"no admin token":   {"live", "--key", "release.key"},
+		"fleet, no tokens": {"fleet", "--trust-keys", "release.pub"},
+		"fleet, no trust":  {"fleet", "--tokens-file", "tokens.txt"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
@@ -93,5 +95,24 @@ func TestRatesOverrideThePreset(t *testing.T) {
 	}
 	if sc, err = c.scenario("fleet"); err != nil || sc.Faults.Unhealthy != 0.3 || sc.Faults.Drop != 0.05 {
 		t.Fatalf("faults = %+v, %v", sc.Faults, err)
+	}
+}
+
+func TestTokensAreReadAsRolloutctlWritesThem(t *testing.T) {
+	dir := t.TempDir()
+	good := dir + "/tokens.txt"
+	if err := os.WriteFile(good, []byte("sim-00001 abc\nsim-00002 def\n\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readTokens(good)
+	if err != nil || len(got) != 2 || got[1].ID != "sim-00002" || got[1].Token != "def" {
+		t.Fatalf("readTokens = %+v, %v", got, err)
+	}
+	bad := dir + "/bad.txt"
+	if err := os.WriteFile(bad, []byte("sim-00001\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readTokens(bad); err == nil {
+		t.Fatal("a line without a token was accepted")
 	}
 }
