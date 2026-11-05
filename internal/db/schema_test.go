@@ -243,3 +243,97 @@ func TestTransitionLogIsAppendOnly(t *testing.T) {
 	_, err = f.pool.Exec(ctx, `DELETE FROM rollout_transitions WHERE rollout_id = $1`, f.rolloutID)
 	requireSQLState(t, err, sqlRestrictViolation)
 }
+
+// exposedFixture is a started rollout with one member, ready for assignments.
+func exposedFixture(t *testing.T, ctx context.Context) fixture {
+	t.Helper()
+	f := newFixture(t, ctx)
+	if err := f.addMember(ctx, f.rolloutID, f.deviceID); err != nil {
+		t.Fatalf("add member: %v", err)
+	}
+	if err := f.start(ctx, f.rolloutID); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	return f
+}
+
+func (f fixture) assign(ctx context.Context, generation int) (string, error) {
+	var id string
+	err := f.pool.QueryRow(ctx, `INSERT INTO assignments
+		(rollout_id, device_id, generation, kind, stage_ordinal, issued_at, expires_at)
+		VALUES ($1, $2, $3, 'forward', 1, now(), now() + interval '1 hour') RETURNING id`,
+		f.rolloutID, f.deviceID, generation).Scan(&id)
+	return id, err
+}
+
+func TestDeviceHasAtMostOneOpenAssignment(t *testing.T) {
+	ctx := testContext(t)
+	f := exposedFixture(t, ctx)
+
+	first, err := f.assign(ctx, 1)
+	if err != nil {
+		t.Fatalf("first assignment: %v", err)
+	}
+	_, err = f.assign(ctx, 2)
+	requireSQLState(t, err, sqlUniqueViolation)
+
+	mustExec(t, ctx, f.pool, `UPDATE assignments SET state = 'superseded', finished_at = now() WHERE id = $1`, first)
+	if _, err := f.assign(ctx, 2); err != nil {
+		t.Fatalf("assignment after the first finished: %v", err)
+	}
+}
+
+func TestAssignmentGenerationIsUniquePerRolloutAndDevice(t *testing.T) {
+	ctx := testContext(t)
+	f := exposedFixture(t, ctx)
+	first, err := f.assign(ctx, 1)
+	if err != nil {
+		t.Fatalf("first assignment: %v", err)
+	}
+	mustExec(t, ctx, f.pool, `UPDATE assignments SET state = 'failed', finished_at = now() WHERE id = $1`, first)
+	_, err = f.assign(ctx, 1)
+	requireSQLState(t, err, sqlUniqueViolation)
+}
+
+func TestAssignmentRequiresRolloutMembership(t *testing.T) {
+	ctx := testContext(t)
+	f := exposedFixture(t, ctx)
+	mustExec(t, ctx, f.pool, `INSERT INTO devices (id, fleet_id, platform, credential_hash)
+		VALUES ('outsider', $1, 'linux/arm64', $2)`, f.fleetID, make([]byte, 32))
+	_, err := f.pool.Exec(ctx, `INSERT INTO assignments
+		(rollout_id, device_id, kind, stage_ordinal, issued_at, expires_at)
+		VALUES ($1, 'outsider', 'forward', 1, now(), now() + interval '1 hour')`, f.rolloutID)
+	requireSQLState(t, err, "23503")
+}
+
+func TestFinishedAtMatchesTerminalAssignmentState(t *testing.T) {
+	ctx := testContext(t)
+	f := exposedFixture(t, ctx)
+	id, err := f.assign(ctx, 1)
+	if err != nil {
+		t.Fatalf("assign: %v", err)
+	}
+	_, err = f.pool.Exec(ctx, `UPDATE assignments SET state = 'succeeded' WHERE id = $1`, id)
+	requireSQLState(t, err, sqlCheckViolation)
+	_, err = f.pool.Exec(ctx, `UPDATE assignments SET finished_at = now() WHERE id = $1`, id)
+	requireSQLState(t, err, sqlCheckViolation)
+	// A stale device can still report late, so stale isn't terminal.
+	mustExec(t, ctx, f.pool, `UPDATE assignments SET state = 'stale' WHERE id = $1`, id)
+}
+
+func TestDeviceEventsAreAppendOnlyAndSequenced(t *testing.T) {
+	ctx := testContext(t)
+	f := exposedFixture(t, ctx)
+	insert := `INSERT INTO device_events (device_id, sequence, type, payload_digest, received_at)
+		VALUES ($1, $2, 'progress', $3, now())`
+	digest := make([]byte, 32)
+	mustExec(t, ctx, f.pool, insert, f.deviceID, 1, digest)
+
+	_, err := f.pool.Exec(ctx, insert, f.deviceID, 1, digest)
+	requireSQLState(t, err, sqlUniqueViolation)
+
+	_, err = f.pool.Exec(ctx, `UPDATE device_events SET type = 'changed' WHERE device_id = $1`, f.deviceID)
+	requireSQLState(t, err, sqlRestrictViolation)
+	_, err = f.pool.Exec(ctx, `DELETE FROM device_events WHERE device_id = $1`, f.deviceID)
+	requireSQLState(t, err, sqlRestrictViolation)
+}
