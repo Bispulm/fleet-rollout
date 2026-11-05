@@ -329,6 +329,13 @@ limit and all of it, and respecting `Retry-After`.
 Authentication, integrity, and policy failures aren't retried as if they were transient. A `401` means the device can't
 do anything useful, so it slows to its longest backoff and keeps its state.
 
+The server serves a bounded number of device requests at once, `ROLLOUTD_MAX_DEVICE_REQUESTS` for polls, reports, and
+manifests, and `ROLLOUTD_MAX_DEVICE_DOWNLOADS` for downloads, which hold their slot while a chunk streams. Past that it
+answers `503` with a `Retry-After` of a few seconds, before touching the database, rather than queueing. Downloads have
+their own pool so that slow ones can't crowd out the reports of devices already installing. So when a whole fleet
+reconnects at once, the excess is turned away cheaply, and the devices come back spread out by the server's
+`Retry-After` and their own jitter.
+
 ### Crashes
 
 Everything needed to recover is saved atomically before it's acted on: the assignment, verified download progress, the
