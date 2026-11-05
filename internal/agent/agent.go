@@ -199,6 +199,16 @@ func (c Checkpoint) clone() Checkpoint {
 
 // enqueue allocates the next sequence for a report. The caller saves the result before
 // acting on it, so a report always exists for anything that happened.
+// awaitingDelivery reports whether the outbox holds a report about an assignment.
+func (c Checkpoint) awaitingDelivery(assignmentID string) bool {
+	for _, report := range c.Outbox {
+		if report.AssignmentID == assignmentID {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Checkpoint) enqueue(rolloutID, assignmentID string, generation int64, state rollout.AssignmentState, reason string) {
 	c.Sequence++
 	c.Outbox = append(c.Outbox, apiv1.ReportRequest{
@@ -484,6 +494,11 @@ func (a *Agent) applyPoll(assignment *apiv1.DeviceAssignment, now time.Time) err
 		work = nil
 	}
 	if assignment == nil {
+		return nil
+	}
+	if work == nil && a.cp.awaitingDelivery(assignment.ID) {
+		// The device has finished this one, and the server will know once the outbox drains.
+		// Until then, what the server says about it is out of date.
 		return nil
 	}
 	if work == nil {

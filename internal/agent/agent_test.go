@@ -80,9 +80,12 @@ func (s *fakeServer) Report(_ context.Context, r apiv1.ReportRequest) (apiv1.Rep
 		s.loseResponse--
 		return apiv1.ReportResponse{}, errors.New("connection lost before the response")
 	}
-	// A terminal report finishes the assignment, as it does on a real server.
-	if r.State.IsTerminal() && s.assignment != nil && s.assignment.ID == r.AssignmentID {
-		s.assignment = nil
+	// The server's view follows the reports, and a terminal one finishes the assignment.
+	if s.assignment != nil && s.assignment.ID == r.AssignmentID {
+		s.assignment.State = r.State
+		if r.State.IsTerminal() {
+			s.assignment = nil
+		}
 	}
 	return apiv1.ReportResponse{Applied: true}, nil
 }
@@ -841,6 +844,24 @@ func TestAnInFlightAssignmentFromBeforeLostStateIsReportedFailed(t *testing.T) {
 	f.runToIdle()
 	if got := f.server.last(); got.State != rollout.AssignmentFailed || got.Reason != agent.ReasonLostState {
 		t.Fatalf("last report = %+v", got)
+	}
+}
+
+func TestAFinishedAssignmentTheServerHasntHeardTheEndOfIsLeftAlone(t *testing.T) {
+	f := newFixture(t)
+	f.runUntil("installing reported", func() bool {
+		return slices.Contains(f.server.states(), rollout.AssignmentInstalling)
+	})
+	// The rest of the reports can't get through, so the server still thinks it's installing.
+	f.server.reportErr = errors.New("network unreachable")
+	f.runUntil("committed", func() bool { return f.agent.Checkpoint().Work == nil })
+	polls := f.server.polls
+	f.runUntil("polled while the reports wait", func() bool { return f.server.polls > polls+1 })
+
+	f.server.reportErr = nil
+	f.runToIdle()
+	if got := f.server.states(); !slices.Equal(got, healthyPath) {
+		t.Fatalf("reports = %v, want %v", got, healthyPath)
 	}
 }
 
