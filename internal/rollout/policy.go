@@ -4,6 +4,8 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 )
@@ -162,10 +164,8 @@ func (s PolicySpec) Normalize() (Policy, error) {
 	if !ValidLabels(s.Selector) {
 		problems.addf("selector", "must have at most %d entries of non-empty letters, digits, '.', '_', '/', and '-'", MaxLabels)
 	}
-	selector := map[string]string{}
-	for k, v := range s.Selector {
-		selector[k] = v
-	}
+	selector := make(map[string]string, len(s.Selector))
+	maps.Copy(selector, s.Selector)
 
 	if len(s.ExcludeDevices) > maxExcludeDevices {
 		problems.addf("exclude_devices", "must have at most %d entries", maxExcludeDevices)
@@ -187,6 +187,8 @@ func (s PolicySpec) Normalize() (Policy, error) {
 	if err := problems.err(); err != nil {
 		return Policy{}, err
 	}
+	// Sorted for fast lookup, and so that input order doesn't change the digest.
+	slices.Sort(exclude)
 	return Policy{Stages: stages, Safety: safety, Selector: selector, ExcludeDevices: exclude}, nil
 }
 

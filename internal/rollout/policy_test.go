@@ -180,6 +180,25 @@ func TestPolicyDigestSurvivesPostgresStyleRoundTrip(t *testing.T) {
 	}
 }
 
+func TestExcludeListOrderDoesNotAffectDigest(t *testing.T) {
+	digestOf := func(exclude ...string) [32]byte {
+		spec := validSpec()
+		spec.ExcludeDevices = exclude
+		p, err := spec.Normalize()
+		if err != nil {
+			t.Fatalf("Normalize: %v", err)
+		}
+		_, digest, err := p.Canonical()
+		if err != nil {
+			t.Fatalf("Canonical: %v", err)
+		}
+		return digest
+	}
+	if digestOf("a", "b", "c") != digestOf("c", "a", "b") {
+		t.Fatal("digest depends on the order of exclude_devices")
+	}
+}
+
 func TestPlanComputesCohortsAndSkipsEmptyStages(t *testing.T) {
 	spec := PolicySpec{
 		Stages: []StageSpec{{Percent: 1}, {Percent: 10}, {Percent: 50}, {Percent: 100}},
