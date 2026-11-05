@@ -51,6 +51,8 @@ func (s *Server) registerAdminRoutes() {
 	s.mux.Handle("POST /v1/fleets/{fleet}/devices", s.admin(s.handleRegisterDevices))
 	s.mux.Handle("GET /v1/fleets/{fleet}/devices", s.admin(s.handleListDevices))
 	s.mux.Handle("PATCH /v1/devices/{id}", s.admin(s.handleUpdateDevice))
+	s.mux.Handle("POST /v1/artifacts", s.admin(s.handleCreateArtifact))
+	s.mux.Handle("GET /v1/artifacts/{id}", s.admin(s.handleGetArtifact))
 }
 
 // decodeJSON reads exactly one JSON document, rejecting unknown fields so that a

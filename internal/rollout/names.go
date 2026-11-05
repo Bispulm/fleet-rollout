@@ -8,6 +8,7 @@ var (
 	fleetNamePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 	deviceIDPattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 	platformPattern  = regexp.MustCompile(`^[a-z0-9]+/[a-z0-9]+$`)
+	versionPattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$`)
 	labelPattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,62}$`)
 	uuidPattern      = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 )
@@ -23,6 +24,9 @@ func ValidDeviceID(s string) bool { return deviceIDPattern.MatchString(s) }
 
 // ValidPlatform reports whether s has the form os/arch.
 func ValidPlatform(s string) bool { return platformPattern.MatchString(s) }
+
+// ValidVersion reports whether s is a valid artifact version.
+func ValidVersion(s string) bool { return versionPattern.MatchString(s) }
 
 // ValidUUID reports whether s is a UUID in canonical lowercase form. Rank keys
 // hash the rollout ID's text, so only one spelling of an ID can be accepted.
