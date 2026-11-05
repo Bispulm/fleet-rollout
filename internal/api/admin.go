@@ -31,13 +31,17 @@ type handlerFunc func(http.ResponseWriter, *http.Request) error
 // admin wraps a handler with the admin token check and a request deadline. Every
 // route under /v1 for operators goes through here.
 func (s *Server) admin(next handlerFunc) http.Handler {
+	return s.adminWithTimeout(adminRequestTimeout, next)
+}
+
+func (s *Server) adminWithTimeout(timeout time.Duration, next handlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !s.adminAuth.Verify(r.Header.Get("Authorization")) {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="admin"`)
 			writeProblemDocument(w, apiv1.Problem{Status: http.StatusUnauthorized, Code: apiv1.CodeUnauthorized})
 			return
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), adminRequestTimeout)
+		ctx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
 		r = r.WithContext(ctx)
 		if err := next(w, r); err != nil {
@@ -54,6 +58,7 @@ func (s *Server) registerAdminRoutes() {
 	s.mux.Handle("PATCH /v1/devices/{id}", s.admin(s.handleUpdateDevice))
 	s.mux.Handle("POST /v1/artifacts", s.admin(s.handleCreateArtifact))
 	s.mux.Handle("GET /v1/artifacts/{id}", s.admin(s.handleGetArtifact))
+	s.mux.Handle("PUT /v1/artifacts/{id}/content", s.adminWithTimeout(uploadTimeout, s.handleUploadContent))
 	s.mux.Handle("POST /v1/fleets/{fleet}/rollouts", s.admin(s.handleCreateRollout))
 	s.mux.Handle("GET /v1/rollouts/{id}", s.admin(s.handleGetRollout))
 	s.mux.Handle("GET /v1/rollouts/{id}/cohort", s.admin(s.handleListCohort))
@@ -64,6 +69,8 @@ func (s *Server) registerAdminRoutes() {
 	s.mux.Handle("POST /v1/rollouts/{id}/abort", s.admin(s.handleTransition(s.store.AbortRollout)))
 	s.mux.Handle("POST /v1/device/poll", s.device(s.handleDevicePoll))
 	s.mux.Handle("POST /v1/device/reports", s.device(s.handleDeviceReport))
+	s.mux.Handle("GET /v1/device/artifacts/{id}/manifest", s.device(s.handleDeviceManifest))
+	s.mux.Handle("GET /v1/device/artifacts/{id}/content", s.device(s.handleDeviceContent))
 }
 
 // decodeJSON reads an admin request body.

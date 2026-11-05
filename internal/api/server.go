@@ -11,7 +11,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Bispulm/fleet-rollout/internal/artifactstore"
 	"github.com/Bispulm/fleet-rollout/internal/auth"
+	"github.com/Bispulm/fleet-rollout/internal/signing"
 	"github.com/Bispulm/fleet-rollout/internal/store"
 )
 
@@ -32,6 +34,12 @@ type Options struct {
 	// AssignmentLease is how long a device may keep working on an assignment without
 	// hearing from the server.
 	AssignmentLease time.Duration
+	// Trust is who may sign artifacts.
+	Trust signing.TrustSet
+	// Artifacts holds artifact bytes.
+	Artifacts artifactstore.Store
+	// MaxArtifactBytes is the largest artifact accepted.
+	MaxArtifactBytes int64
 }
 
 // Server is the HTTP API. It is safe for concurrent use.
@@ -44,8 +52,11 @@ type Server struct {
 	handler   http.Handler
 	draining  atomic.Bool
 
-	pollInterval    time.Duration
-	assignmentLease time.Duration
+	pollInterval     time.Duration
+	assignmentLease  time.Duration
+	trust            signing.TrustSet
+	artifacts        artifactstore.Store
+	maxArtifactBytes int64
 }
 
 // New builds a Server with its routes registered.
@@ -56,8 +67,14 @@ func New(opts Options) *Server {
 		store:  opts.Store,
 		mux:    http.NewServeMux(),
 
-		pollInterval:    opts.PollInterval,
-		assignmentLease: opts.AssignmentLease,
+		pollInterval:     opts.PollInterval,
+		assignmentLease:  opts.AssignmentLease,
+		trust:            opts.Trust,
+		artifacts:        opts.Artifacts,
+		maxArtifactBytes: opts.MaxArtifactBytes,
+	}
+	if s.maxArtifactBytes == 0 {
+		s.maxArtifactBytes = defaultMaxArtifactBytes
 	}
 	if s.pollInterval == 0 {
 		s.pollInterval = defaultPollInterval

@@ -66,6 +66,7 @@ func (s *Server) handleDevicePoll(w http.ResponseWriter, r *http.Request, device
 	out := apiv1.PollResponse{PollAfterSeconds: int(s.pollInterval / time.Second)}
 	if assignment != nil {
 		document := deviceAssignmentDocument(*assignment)
+		document.LeaseSeconds = int(s.assignmentLease / time.Second)
 		out.Assignment = &document
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -122,6 +123,7 @@ func deviceAssignmentDocument(a store.Assignment) apiv1.DeviceAssignment {
 		Stage:      a.Stage,
 		State:      a.State,
 		Directive:  a.Directive,
+		Kind:       a.Kind,
 		ExpiresAt:  a.ExpiresAt,
 		Artifact:   artifactDocument(a.Artifact),
 	}

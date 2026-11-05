@@ -4,7 +4,9 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
 	"fmt"
 	"log/slog"
 	"net/http/httptest"
@@ -18,9 +20,12 @@ import (
 
 	"github.com/Bispulm/fleet-rollout/internal/api"
 	"github.com/Bispulm/fleet-rollout/internal/apiv1"
+	"github.com/Bispulm/fleet-rollout/internal/artifactstore"
 	"github.com/Bispulm/fleet-rollout/internal/client"
 	"github.com/Bispulm/fleet-rollout/internal/engine"
 	"github.com/Bispulm/fleet-rollout/internal/rollout"
+	"github.com/Bispulm/fleet-rollout/internal/signing"
+	"github.com/Bispulm/fleet-rollout/internal/signing/signingtest"
 	"github.com/Bispulm/fleet-rollout/internal/store"
 	"github.com/Bispulm/fleet-rollout/internal/testdb"
 )
@@ -68,6 +73,8 @@ type fixture struct {
 	cp      *controlPlane
 	devices map[string]*device
 	release int64
+	signer  ed25519.PrivateKey
+	store   artifactstore.Store
 }
 
 func newFixture(t *testing.T, devices int) *fixture {
@@ -75,7 +82,14 @@ func newFixture(t *testing.T, devices int) *fixture {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	t.Cleanup(cancel)
-	f := &fixture{t: t, ctx: ctx, pool: testdb.New(t), clock: newClock(), devices: map[string]*device{}}
+	artifacts, err := artifactstore.NewFilesystem(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewFilesystem: %v", err)
+	}
+	f := &fixture{
+		t: t, ctx: ctx, pool: testdb.New(t), clock: newClock(), devices: map[string]*device{},
+		signer: signingtest.NewKey(t), store: artifacts,
+	}
 	f.cp = f.newControlPlane("control-plane-a")
 
 	if _, err := f.cp.admin.CreateFleet(ctx, apiv1.CreateFleetRequest{Name: fleetName}); err != nil {
@@ -106,6 +120,8 @@ func (f *fixture) newControlPlane(holder string) *controlPlane {
 		Ready:      func(context.Context) error { return nil },
 		Store:      st,
 		AdminToken: adminToken,
+		Trust:      signingtest.Trust(f.t, f.signer),
+		Artifacts:  f.store,
 	}))
 	f.t.Cleanup(ts.Close)
 	return &controlPlane{
@@ -123,12 +139,17 @@ func (f *fixture) newControlPlane(holder string) *controlPlane {
 func (f *fixture) startRollout(name string, edit func(*rollout.PolicySpec)) apiv1.Rollout {
 	f.t.Helper()
 	f.release++
-	artifact, err := f.cp.admin.CreateArtifact(f.ctx, apiv1.CreateArtifactRequest{
+	content := []byte(strings.Repeat("release "+fmt.Sprint(f.release), 500))
+	_, envelope := signingtest.Signed(f.t, f.signer, signing.Meta{
 		Name: "demo-app", Version: fmt.Sprintf("1.%d.0", f.release), Platform: "linux/arm64",
-		ReleaseCounter: f.release, SizeBytes: 1, SHA256: strings.Repeat("a", 64),
-	})
+		ReleaseCounter: f.release, ChunkSize: 1024,
+	}, content)
+	artifact, err := f.cp.admin.CreateArtifact(f.ctx, envelope)
 	if err != nil {
 		f.t.Fatalf("CreateArtifact: %v", err)
+	}
+	if err := f.cp.admin.UploadArtifactContent(f.ctx, artifact.ID, bytes.NewReader(content), int64(len(content))); err != nil {
+		f.t.Fatalf("UploadArtifactContent: %v", err)
 	}
 	return f.startRolloutOf(name, artifact.ID, edit)
 }

@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +14,8 @@ import (
 
 	"github.com/Bispulm/fleet-rollout/internal/api"
 	"github.com/Bispulm/fleet-rollout/internal/apiv1"
+	"github.com/Bispulm/fleet-rollout/internal/artifactstore"
+	"github.com/Bispulm/fleet-rollout/internal/signing/signingtest"
 	"github.com/Bispulm/fleet-rollout/internal/store"
 	"github.com/Bispulm/fleet-rollout/internal/testdb"
 )
@@ -20,23 +23,38 @@ import (
 const testAdminToken = "test-admin-credential-value"
 
 type harness struct {
-	t    *testing.T
-	base string
+	t      *testing.T
+	base   string
+	signer ed25519.PrivateKey
 }
 
 func newHarness(t *testing.T) harness {
 	t.Helper()
+	return newHarnessWithLimit(t, 0)
+}
+
+// newHarnessWithLimit uses the server's default artifact size limit if limit is zero.
+func newHarnessWithLimit(t *testing.T, limit int64) harness {
+	t.Helper()
 	t.Parallel()
 	pool := testdb.New(t)
+	signer := signingtest.NewKey(t)
+	artifacts, err := artifactstore.NewFilesystem(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewFilesystem: %v", err)
+	}
 	srv := api.New(api.Options{
-		Logger:     slog.New(slog.DiscardHandler),
-		Ready:      alwaysReady,
-		Store:      store.New(pool),
-		AdminToken: testAdminToken,
+		Logger:           slog.New(slog.DiscardHandler),
+		Ready:            alwaysReady,
+		Store:            store.New(pool),
+		AdminToken:       testAdminToken,
+		Trust:            signingtest.Trust(t, signer),
+		Artifacts:        artifacts,
+		MaxArtifactBytes: limit,
 	})
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
-	return harness{t: t, base: ts.URL}
+	return harness{t: t, base: ts.URL, signer: signer}
 }
 
 // on returns a harness that reports failures to t. Subtests must use it, because

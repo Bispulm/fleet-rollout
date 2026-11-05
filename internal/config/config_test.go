@@ -9,8 +9,10 @@ import (
 
 func env(overrides map[string]string) func(string) string {
 	base := map[string]string{
-		"ROLLOUTD_DATABASE_URL": "postgres://u:hunter2@127.0.0.1:15431/rollout",
-		"ROLLOUTD_ADMIN_TOKEN":  strings.Repeat("x", minAdminTokenLength),
+		"ROLLOUTD_DATABASE_URL":    "postgres://u:hunter2@127.0.0.1:15431/rollout",
+		"ROLLOUTD_ADMIN_TOKEN":     strings.Repeat("x", minAdminTokenLength),
+		"ROLLOUTD_TRUST_KEYS_FILE": "/etc/rollout/trust.pem",
+		"ROLLOUTD_ARTIFACT_DIR":    "/var/lib/rollout/artifacts",
 	}
 	for k, v := range overrides {
 		base[k] = v
@@ -38,7 +40,7 @@ func TestLoadAppliesLoopbackAndDefaults(t *testing.T) {
 }
 
 func TestLoadRejectsMissingSecrets(t *testing.T) {
-	for _, name := range []string{"ROLLOUTD_DATABASE_URL", "ROLLOUTD_ADMIN_TOKEN"} {
+	for _, name := range []string{"ROLLOUTD_DATABASE_URL", "ROLLOUTD_ADMIN_TOKEN", "ROLLOUTD_TRUST_KEYS_FILE", "ROLLOUTD_ARTIFACT_DIR"} {
 		t.Run(name, func(t *testing.T) {
 			_, err := Load(env(map[string]string{name: ""}))
 			if err == nil || !strings.Contains(err.Error(), name) {
@@ -185,5 +187,27 @@ func TestLoadAcceptsTimingAtTheBoundaries(t *testing.T) {
 	}))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
+	}
+}
+
+func TestLoadArtifactLimit(t *testing.T) {
+	cfg, err := Load(env(nil))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MaxArtifactBytes != 1<<30 {
+		t.Fatalf("default limit = %d", cfg.MaxArtifactBytes)
+	}
+	cfg, err = Load(env(map[string]string{"ROLLOUTD_MAX_ARTIFACT_BYTES": "2048"}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MaxArtifactBytes != 2048 || cfg.TrustKeysFile != "/etc/rollout/trust.pem" || cfg.ArtifactDir != "/var/lib/rollout/artifacts" {
+		t.Fatalf("config = %+v", cfg)
+	}
+	for _, bad := range []string{"0", "-1", "lots"} {
+		if _, err := Load(env(map[string]string{"ROLLOUTD_MAX_ARTIFACT_BYTES": bad})); err == nil {
+			t.Errorf("accepted a limit of %q", bad)
+		}
 	}
 }

@@ -2,8 +2,7 @@ package cli
 
 import (
 	"bufio"
-	"crypto/sha256"
-	"encoding/hex"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,7 +14,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Bispulm/fleet-rollout/internal/apiv1"
+	"github.com/Bispulm/fleet-rollout/internal/client"
 	"github.com/Bispulm/fleet-rollout/internal/rollout"
+	"github.com/Bispulm/fleet-rollout/internal/signing"
 )
 
 const deviceBatchSize = 1000
@@ -304,37 +305,39 @@ func (a *app) deviceSetStatusCommand() *cobra.Command {
 func (a *app) artifactCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "artifact", Short: "Manage artifacts"}
 
-	var name, version, platform, file string
-	var release int64
-	register := &cobra.Command{
-		Use:   "register",
-		Short: "Register a file's metadata, computing its digest and size",
-		Args:  cobra.NoArgs,
+	var name, version, platform, file, keyFile string
+	var release, chunkSize int64
+	push := &cobra.Command{
+		Use:   "push",
+		Short: "Sign an artifact with your key, then register and upload it",
+		Long: `Sign an artifact with your key, then register and upload it.
+
+The manifest describes the file down to each chunk, and it's signed here, so the private key
+stays on this machine. The server only accepts it if the key is on its trust list. Devices
+check the signature themselves too. It's safe to repeat this if it gets interrupted.`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			c, err := a.client()
 			if err != nil {
 				return err
 			}
-			digest, size, err := hashFile(file)
-			if err != nil {
-				return err
-			}
-			artifact, err := c.CreateArtifact(cmd.Context(), apiv1.CreateArtifactRequest{
-				Name: name, Version: version, Platform: platform,
-				ReleaseCounter: release, SizeBytes: size, SHA256: digest,
-			})
+			artifact, err := pushArtifact(cmd, c, signing.Meta{
+				Name: name, Version: version, Platform: platform, ReleaseCounter: release, ChunkSize: chunkSize,
+			}, file, keyFile)
 			if err != nil {
 				return err
 			}
 			return a.printArtifact(artifact)
 		},
 	}
-	register.Flags().StringVar(&name, "name", "", "artifact name")
-	register.Flags().StringVar(&version, "version", "", "version label")
-	register.Flags().StringVar(&platform, "platform", "", "platform as os/arch")
-	register.Flags().Int64Var(&release, "release", 0, "monotonic release counter, used for downgrade protection")
-	register.Flags().StringVar(&file, "file", "", "path to the artifact file")
-	mustMarkRequired(register, "name", "version", "platform", "release", "file")
+	push.Flags().StringVar(&name, "name", "", "artifact name")
+	push.Flags().StringVar(&version, "version", "", "version label")
+	push.Flags().StringVar(&platform, "platform", "", "platform as os/arch")
+	push.Flags().Int64Var(&release, "release", 0, "monotonic release counter, used for downgrade protection")
+	push.Flags().StringVar(&file, "file", "", "path to the artifact file")
+	push.Flags().StringVar(&keyFile, "key", "", "path to your private signing key")
+	push.Flags().Int64Var(&chunkSize, "chunk-size", signing.DefaultChunkSize, "bytes a device downloads and verifies at a time")
+	mustMarkRequired(push, "name", "version", "platform", "release", "file", "key")
 
 	get := &cobra.Command{
 		Use:   "get <id>",
@@ -352,31 +355,116 @@ func (a *app) artifactCommand() *cobra.Command {
 			return a.printArtifact(artifact)
 		},
 	}
-	cmd.AddCommand(register, get)
+	cmd.AddCommand(push, get)
 	return cmd
 }
 
-// hashFile streams a file through SHA-256, so size doesn't affect memory use.
-func hashFile(path string) (string, int64, error) {
+// pushArtifact builds and signs a manifest from a file, then registers and uploads it. Both
+// server calls can be repeated, so a retry picks up wherever an earlier attempt stopped.
+func pushArtifact(cmd *cobra.Command, c *client.Client, meta signing.Meta, path, keyFile string) (apiv1.Artifact, error) {
+	encodedKey, err := os.ReadFile(keyFile) //nolint:gosec // Reading the file the operator named is the point.
+	if err != nil {
+		return apiv1.Artifact{}, fmt.Errorf("read signing key: %w", err)
+	}
+	key, err := signing.ParsePrivateKey(encodedKey)
+	if err != nil {
+		return apiv1.Artifact{}, fmt.Errorf("read signing key: %w", err)
+	}
 	file, err := os.Open(path) //nolint:gosec // Reading the file the operator named is the point.
 	if err != nil {
-		return "", 0, fmt.Errorf("open artifact: %w", err)
+		return apiv1.Artifact{}, fmt.Errorf("open artifact: %w", err)
 	}
 	defer func() { _ = file.Close() }()
-	hash := sha256.New()
-	size, err := io.Copy(hash, file)
+
+	manifest, err := signing.BuildManifest(meta, file)
 	if err != nil {
-		return "", 0, fmt.Errorf("read artifact: %w", err)
+		return apiv1.Artifact{}, err
 	}
-	return hex.EncodeToString(hash.Sum(nil)), size, nil
+	envelope, err := signing.Sign(key, manifest)
+	if err != nil {
+		return apiv1.Artifact{}, err
+	}
+	artifact, err := c.CreateArtifact(cmd.Context(), envelope)
+	if err != nil {
+		return apiv1.Artifact{}, err
+	}
+	if artifact.ContentReady {
+		return artifact, nil
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return apiv1.Artifact{}, fmt.Errorf("rewind artifact: %w", err)
+	}
+	if err := c.UploadArtifactContent(cmd.Context(), artifact.ID, file, manifest.SizeBytes); err != nil {
+		return apiv1.Artifact{}, err
+	}
+	artifact.ContentReady = true
+	return artifact, nil
+}
+
+func (a *app) keyCommand() *cobra.Command {
+	cmd := &cobra.Command{Use: "key", Short: "Manage signing keys"}
+	var privatePath, publicPath string
+	generate := &cobra.Command{
+		Use:   "generate",
+		Short: "Create an Ed25519 signing key",
+		Long: `Create an Ed25519 signing key. The private key signs releases, and stays with you. The public
+key goes on the trust list of the server and of every device.`,
+		Args: cobra.NoArgs,
+		RunE: func(*cobra.Command, []string) error {
+			key, err := signing.GenerateKey()
+			if err != nil {
+				return err
+			}
+			encodedPrivate, err := signing.MarshalPrivateKey(key)
+			if err != nil {
+				return err
+			}
+			public, ok := key.Public().(ed25519.PublicKey)
+			if !ok {
+				return errors.New("not an Ed25519 key")
+			}
+			encodedPublic, err := signing.MarshalPublicKey(public)
+			if err != nil {
+				return err
+			}
+			// Replacing a key by accident would strand every device that trusts it.
+			if err := writeNewFile(privatePath, encodedPrivate, 0o600); err != nil {
+				return fmt.Errorf("write private key: %w", err)
+			}
+			if err := writeNewFile(publicPath, encodedPublic, 0o644); err != nil {
+				return fmt.Errorf("write public key: %w", err)
+			}
+			_, err = fmt.Fprintf(a.stdout, "Wrote private key to %s, and public key to %s. Key ID: %s\n",
+				privatePath, publicPath, signing.KeyID(public))
+			return err
+		},
+	}
+	generate.Flags().StringVar(&privatePath, "private-key", "", "where to write the private key")
+	generate.Flags().StringVar(&publicPath, "public-key", "", "where to write the public key")
+	mustMarkRequired(generate, "private-key", "public-key")
+	cmd.AddCommand(generate)
+	return cmd
+}
+
+// writeNewFile fails if the file already exists.
+func writeNewFile(path string, data []byte, mode os.FileMode) error {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode) //nolint:gosec // The operator chose this path.
+	if err != nil {
+		return err
+	}
+	defer func() { _ = file.Close() }()
+	if _, err := file.Write(data); err != nil {
+		return err
+	}
+	return file.Close()
 }
 
 func (a *app) printArtifact(artifact apiv1.Artifact) error {
 	if a.output == outputJSON {
 		return a.printJSON(artifact)
 	}
-	_, err := fmt.Fprintf(a.stdout, "Artifact %s\n  %s %s for %s, release %d\n  %d bytes, sha256 %s\n",
-		artifact.ID, artifact.Name, artifact.Version, artifact.Platform, artifact.ReleaseCounter, artifact.SizeBytes, artifact.SHA256)
+	_, err := fmt.Fprintf(a.stdout, "Artifact %s\n  %s %s for %s, release %d\n  %d bytes, sha256 %s\n  Content ready: %t\n",
+		artifact.ID, artifact.Name, artifact.Version, artifact.Platform, artifact.ReleaseCounter, artifact.SizeBytes, artifact.SHA256, artifact.ContentReady)
 	return err
 }
 

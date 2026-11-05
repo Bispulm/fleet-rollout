@@ -3,6 +3,8 @@ package cli_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -16,9 +18,12 @@ import (
 
 	"github.com/Bispulm/fleet-rollout/internal/api"
 	"github.com/Bispulm/fleet-rollout/internal/apiv1"
+	"github.com/Bispulm/fleet-rollout/internal/artifactstore"
 	"github.com/Bispulm/fleet-rollout/internal/cli"
 	"github.com/Bispulm/fleet-rollout/internal/client"
 	"github.com/Bispulm/fleet-rollout/internal/rollout"
+	"github.com/Bispulm/fleet-rollout/internal/signing"
+	"github.com/Bispulm/fleet-rollout/internal/signing/signingtest"
 	"github.com/Bispulm/fleet-rollout/internal/store"
 	"github.com/Bispulm/fleet-rollout/internal/testdb"
 )
@@ -31,22 +36,38 @@ type env struct {
 	getenv func(string) string
 	base   string
 	store  *store.Store
+	key    string // Path to a private key the server trusts.
 }
 
 func newEnv(t *testing.T) env {
 	t.Helper()
 	t.Parallel()
 	st := store.New(testdb.New(t))
+	signer := signingtest.NewKey(t)
+	encodedKey, err := signing.MarshalPrivateKey(signer)
+	if err != nil {
+		t.Fatalf("MarshalPrivateKey: %v", err)
+	}
+	keyPath := filepath.Join(t.TempDir(), "release.key")
+	if err := os.WriteFile(keyPath, encodedKey, 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+	artifacts, err := artifactstore.NewFilesystem(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewFilesystem: %v", err)
+	}
 	srv := api.New(api.Options{
 		Logger:     slog.New(slog.DiscardHandler),
 		Ready:      func(context.Context) error { return nil },
 		Store:      st,
 		AdminToken: adminToken,
+		Trust:      signingtest.Trust(t, signer),
+		Artifacts:  artifacts,
 	})
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 	vars := map[string]string{"ROLLOUT_API_URL": ts.URL, "ROLLOUT_ADMIN_TOKEN": adminToken}
-	return env{t: t, getenv: func(k string) string { return vars[k] }, base: ts.URL, store: st}
+	return env{t: t, getenv: func(k string) string { return vars[k] }, base: ts.URL, store: st, key: keyPath}
 }
 
 func (e env) run(args ...string) (string, error) {
@@ -88,8 +109,8 @@ func (e env) seed(n int) string {
 	if err := os.WriteFile(file, []byte("synthetic artifact bytes"), 0o600); err != nil {
 		e.t.Fatalf("write artifact: %v", err)
 	}
-	artifact := mustJSON[apiv1.Artifact](e, "artifact", "register", "--name", "demo-app", "--version", "1.4.0",
-		"--platform", "linux/arm64", "--release", "14", "--file", file)
+	artifact := mustJSON[apiv1.Artifact](e, "artifact", "push", "--name", "demo-app", "--version", "1.4.0",
+		"--platform", "linux/arm64", "--release", "14", "--file", file, "--key", e.key, "--chunk-size", "1024")
 	return artifact.ID
 }
 
@@ -345,28 +366,116 @@ func TestRegisterSyntheticSaysWhenTokensAreDiscarded(t *testing.T) {
 	}
 }
 
-func TestArtifactRegisterComputesDigestAndSize(t *testing.T) {
+func TestArtifactPushSignsAndUploads(t *testing.T) {
 	e := newEnv(t)
-	content := []byte("hello artifact")
+	content := []byte(strings.Repeat("hello artifact ", 500))
 	file := filepath.Join(t.TempDir(), "a.bin")
 	if err := os.WriteFile(file, content, 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	created := mustJSON[apiv1.Artifact](e, "artifact", "register", "--name", "demo", "--version", "1.0.0",
-		"--platform", "linux/arm64", "--release", "1", "--file", file)
+	args := []string{"artifact", "push", "--name", "demo", "--version", "1.0.0", "--platform", "linux/arm64",
+		"--release", "1", "--file", file, "--key", e.key, "--chunk-size", "1024"}
+	created := mustJSON[apiv1.Artifact](e, args...)
 
-	// Computed independently with: printf 'hello artifact' | shasum -a 256
-	const wantDigest = "d1cc3064379fca32757730461bd728cb7de430e46a0046aa59ab55c65be7ce3b"
-	if created.SHA256 != wantDigest || created.SizeBytes != int64(len(content)) {
+	digest := sha256.Sum256(content)
+	if created.SHA256 != hex.EncodeToString(digest[:]) || created.SizeBytes != int64(len(content)) || !created.ContentReady {
 		t.Fatalf("created = %+v", created)
 	}
-	got := mustJSON[apiv1.Artifact](e, "artifact", "get", created.ID)
-	if got.ID != created.ID {
+	if got := mustJSON[apiv1.Artifact](e, "artifact", "get", created.ID); got.ID != created.ID || !got.ContentReady {
 		t.Fatalf("got = %+v", got)
 	}
-	if _, err := e.run("artifact", "register", "--name", "demo", "--version", "2.0.0",
-		"--platform", "linux/arm64", "--release", "2", "--file", filepath.Join(t.TempDir(), "missing")); err == nil {
-		t.Fatal("registered a missing file")
+
+	// An interrupted push can simply be run again.
+	if again := mustJSON[apiv1.Artifact](e, args...); again.ID != created.ID {
+		t.Fatalf("a repeat returned %s, want %s", again.ID, created.ID)
+	}
+}
+
+func TestArtifactPushIsRefusedWithAnUntrustedKey(t *testing.T) {
+	e := newEnv(t)
+	dir := t.TempDir()
+	e.mustRun("key", "generate", "--private-key", filepath.Join(dir, "other.key"), "--public-key", filepath.Join(dir, "other.pub"))
+	file := filepath.Join(dir, "a.bin")
+	if err := os.WriteFile(file, []byte(strings.Repeat("x", 2000)), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_, err := e.run("artifact", "push", "--name", "demo", "--version", "1.0.0", "--platform", "linux/arm64",
+		"--release", "1", "--file", file, "--key", filepath.Join(dir, "other.key"), "--chunk-size", "1024")
+	if err == nil || !strings.Contains(err.Error(), "trusted") {
+		t.Fatalf("error = %v, want a refusal", err)
+	}
+}
+
+func TestArtifactPushReportsLocalProblems(t *testing.T) {
+	e := newEnv(t)
+	dir := t.TempDir()
+	base := []string{"artifact", "push", "--name", "demo", "--version", "1.0.0", "--platform", "linux/arm64", "--release", "1"}
+	file := filepath.Join(dir, "a.bin")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	notAKey := filepath.Join(dir, "not-a-key")
+	if err := os.WriteFile(notAKey, []byte("nope"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	for name, extra := range map[string][]string{
+		"missing file": {"--file", filepath.Join(dir, "missing"), "--key", e.key},
+		"missing key":  {"--file", file, "--key", filepath.Join(dir, "missing")},
+		"bad key":      {"--file", file, "--key", notAKey},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := e.run(append(slices.Clone(base), extra...)...); err == nil {
+				t.Fatal("push succeeded")
+			}
+		})
+	}
+}
+
+func TestKeyGenerateWritesAUsablePairPrivately(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	dir := t.TempDir()
+	private, public := filepath.Join(dir, "release.key"), filepath.Join(dir, "release.pub")
+	args := []string{"key", "generate", "--private-key", private, "--public-key", public}
+	// No server and no token are involved in making a key.
+	if err := cli.Execute(t.Context(), args, &stdout, &stderr, func(string) string { return "" }); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	info, err := os.Stat(private)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("private key mode = %o", info.Mode().Perm())
+	}
+	encodedPrivate, err := os.ReadFile(private)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	key, err := signing.ParsePrivateKey(encodedPrivate)
+	if err != nil {
+		t.Fatalf("ParsePrivateKey: %v", err)
+	}
+	encodedPublic, err := os.ReadFile(public)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	set, err := signing.ParseTrustSet(encodedPublic)
+	if err != nil {
+		t.Fatalf("ParseTrustSet: %v", err)
+	}
+	_, envelope := signingtest.Signed(t, key, signing.Meta{
+		Name: "demo", Version: "1.0.0", Platform: "linux/arm64", ReleaseCounter: 1, ChunkSize: 1024,
+	}, []byte("content"))
+	if _, err := set.Verify(envelope); err != nil {
+		t.Fatalf("the pair doesn't match: %v", err)
+	}
+	if strings.Contains(stdout.String(), "PRIVATE") {
+		t.Fatalf("printed key material: %s", stdout.String())
+	}
+
+	// Replacing a key by accident would strand every device that trusts it.
+	if err := cli.Execute(t.Context(), args, &stdout, &stderr, func(string) string { return "" }); err == nil {
+		t.Fatal("overwrote an existing key")
 	}
 }
 
@@ -376,7 +485,7 @@ func TestHelpDescribesEveryCommand(t *testing.T) {
 	if err := cli.Execute(t.Context(), []string{"--help"}, &stdout, &stderr, getenv); err != nil {
 		t.Fatalf("help: %v", err)
 	}
-	for _, want := range []string{"fleet", "device", "artifact", "rollout", "ROLLOUT_ADMIN_TOKEN", "ROLLOUT_API_URL"} {
+	for _, want := range []string{"key", "fleet", "device", "artifact", "rollout", "ROLLOUT_ADMIN_TOKEN", "ROLLOUT_API_URL"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Errorf("help is missing %q:\n%s", want, stdout.String())
 		}
@@ -433,8 +542,8 @@ func TestStatusExplainsProgressAndHalts(t *testing.T) {
 	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	artifact := mustJSON[apiv1.Artifact](e, "artifact", "register", "--name", "demo", "--version", "1.0.0",
-		"--platform", "linux/arm64", "--release", "1", "--file", file)
+	artifact := mustJSON[apiv1.Artifact](e, "artifact", "push", "--name", "demo", "--version", "1.0.0",
+		"--platform", "linux/arm64", "--release", "1", "--file", file, "--key", e.key)
 	var tokens []string
 	for _, id := range []string{"bench-1", "bench-2"} {
 		registered := mustJSON[apiv1.DeviceList](e, "device", "register", "--fleet", "lab-a", "--id", id, "--platform", "linux/arm64")

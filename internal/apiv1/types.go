@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Bispulm/fleet-rollout/internal/rollout"
+	"github.com/Bispulm/fleet-rollout/internal/signing"
 )
 
 // CreateFleetRequest is the body of POST /v1/fleets.
@@ -83,17 +84,14 @@ const (
 	CodeUnauthorized       = "unauthorized"
 )
 
-// CreateArtifactRequest is the body of POST /v1/artifacts. SHA256 is lowercase hex.
+// CreateArtifactRequest is the body of POST /v1/artifacts: a signed manifest. The artifact's
+// bytes follow in a PUT to its content URL.
 type CreateArtifactRequest struct {
-	Name           string `json:"name"`
-	Version        string `json:"version"`
-	Platform       string `json:"platform"`
-	ReleaseCounter int64  `json:"release_counter"`
-	SizeBytes      int64  `json:"size_bytes"`
-	SHA256         string `json:"sha256"`
+	Envelope signing.Envelope `json:"envelope"`
 }
 
-// Artifact is immutable metadata for a release.
+// Artifact is immutable metadata for a release. A rollout needs ContentReady, which means
+// the bytes are stored and match the signed manifest.
 type Artifact struct {
 	ID             string    `json:"id"`
 	Name           string    `json:"name"`
@@ -102,6 +100,8 @@ type Artifact struct {
 	ReleaseCounter int64     `json:"release_counter"`
 	SizeBytes      int64     `json:"size_bytes"`
 	SHA256         string    `json:"sha256"`
+	ChunkSize      int64     `json:"chunk_size"`
+	ContentReady   bool      `json:"content_ready"`
 	CreatedAt      time.Time `json:"created_at"`
 }
 
@@ -213,8 +213,12 @@ type DeviceAssignment struct {
 	Stage      int                     `json:"stage"`
 	State      rollout.AssignmentState `json:"state"`
 	Directive  rollout.Directive       `json:"directive"`
+	Kind       string                  `json:"kind"`
 	ExpiresAt  time.Time               `json:"expires_at"`
-	Artifact   Artifact                `json:"artifact"`
+	// LeaseSeconds is how long from receiving this response the lease lasts. A device
+	// should use this rather than ExpiresAt, because its clock may not match the server's.
+	LeaseSeconds int      `json:"lease_seconds"`
+	Artifact     Artifact `json:"artifact"`
 }
 
 // PollResponse is the response to POST /v1/device/poll. Assignment is null when there's
@@ -248,4 +252,12 @@ type ReportResponse struct {
 const (
 	CodeReportConflict = "report_conflict"
 	CodeReportMismatch = "report_mismatch"
+)
+
+// The problem codes for artifacts. None of these can be fixed by retrying.
+const (
+	CodeInvalidSignature = "invalid_signature"
+	CodeInvalidManifest  = "invalid_manifest"
+	CodeContentMismatch  = "content_mismatch"
+	CodeNoOpenAssignment = "no_open_assignment"
 )

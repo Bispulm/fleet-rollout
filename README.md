@@ -6,8 +6,8 @@ bad release reaches everyone.
 
 **Status: early development.** The control plane works: it issues assignments to devices that poll,
 takes their reports, advances stages, and halts a rollout that crosses a safety threshold. There's no
-real device agent yet, and artifacts are metadata only, so nothing is downloaded or installed. See
-[what works](#what-works-today) and the [roadmap](#roadmap).
+real device agent yet. Artifacts are signed and stored, and devices can fetch them, but nothing installs
+them yet. See [what works](#what-works-today) and the [roadmap](#roadmap).
 
 All devices are simulated. This isn't meant to run on real hardware.
 
@@ -18,9 +18,14 @@ You need Go, Docker with Compose, `make`, and `openssl`. Run these from the repo
 ```bash
 make dev-up build
 
+# The private key signs releases. The server, and later every device, trusts the public key.
+./bin/rolloutctl key generate --private-key release.key --public-key release.pub
+
 export ROLLOUTD_DATABASE_URL='postgres://rollout:rollout_dev@127.0.0.1:15431/rollout?sslmode=disable'
 export ROLLOUTD_ADMIN_TOKEN="$(openssl rand -hex 24)"
 export ROLLOUT_ADMIN_TOKEN="$ROLLOUTD_ADMIN_TOKEN"
+export ROLLOUTD_TRUST_KEYS_FILE=release.pub
+export ROLLOUTD_ARTIFACT_DIR=artifacts
 
 ./bin/rolloutd migrate
 ./bin/rolloutd serve 2> rolloutd.log &
@@ -30,10 +35,11 @@ sleep 1
 ./bin/rolloutctl device register-synthetic --fleet lab-a --count 100 --platform linux/arm64 \
   --tokens-file tokens.txt
 
-# Any file works as an artifact. Only its size and digest are recorded for now.
+# Any file works as an artifact. It's opaque bytes, and nothing unpacks or runs it. This signs a
+# manifest of the file on this machine, then registers and uploads it.
 head -c 4096 /dev/urandom > demo-app.bin
-./bin/rolloutctl artifact register --name demo-app --version 1.4.0 --platform linux/arm64 \
-  --release 14 --file demo-app.bin -o json | tee artifact.json
+./bin/rolloutctl artifact push --name demo-app --version 1.4.0 --platform linux/arm64 \
+  --release 14 --file demo-app.bin --key release.key -o json | tee artifact.json
 ARTIFACT_ID="$(sed -n 's/.*"id": "\(.*\)",/\1/p' artifact.json)"
 
 # Choosing the rollout ID makes the cohort below reproducible on any machine.
@@ -110,7 +116,7 @@ To clean up:
 ```bash
 kill %1                # stop rolloutd
 make dev-reset         # stop Postgres and delete this project's data
-rm -f artifact.json demo-app.bin rolloutd.log tokens.txt
+rm -rf artifact.json artifacts demo-app.bin release.key release.pub rolloutd.log tokens.txt
 ```
 
 ## What works today
@@ -118,6 +124,7 @@ rm -f artifact.json demo-app.bin rolloutd.log tokens.txt
 | Area | Behavior |
 |---|---|
 | Fleets and devices | Registration is all or nothing. Device tokens are shown once and stored as hashes. |
+| Artifacts | A signed manifest covers the artifact's metadata and every chunk's digest. Unsigned or untrusted artifacts are refused, and bytes that don't match the manifest are never stored. Devices fetch with Range requests, and only while they hold an assignment. |
 | Rollout policy | Validated when created and again when started. A rollout that could never satisfy its own policy is rejected. Defaults are copied into the rollout, so later changes can't affect it. |
 | Cohorts | Devices rank by a hash of the rollout ID and device ID, so stages are nested and reproducible. |
 | Frozen data | Membership and policy freeze at start. Database triggers enforce this, not just application code. |
@@ -137,8 +144,8 @@ together, and [docs/adr](docs/adr) records the decisions.
 
 None of this exists yet.
 
-- **Devices:** signed artifacts, a durable agent with resumable downloads and simulated A/B installs, and
-  a failure-injecting simulator that runs the real agent.
+- **Devices:** a durable agent with resumable downloads and simulated A/B installs, and a failure-injecting
+  simulator that runs the real agent.
 - **Kubernetes:** custom resources, an operator, and a Helm chart.
 - **Safety and operations:** rollback, metrics, traces, and dashboards, plus scale testing of the paths
   built so far.

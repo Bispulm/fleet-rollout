@@ -18,6 +18,7 @@ type Assignment struct {
 	RolloutID  string
 	DeviceID   string
 	Generation int64
+	Kind       string
 	Stage      int
 	State      rollout.AssignmentState
 	IssuedAt   time.Time
@@ -89,11 +90,11 @@ func renewOpenAssignment(ctx context.Context, tx pgx.Tx, deviceID string, now ti
 	var rolloutState rollout.State
 	var artifactID string
 	err := tx.QueryRow(ctx, `
-		SELECT a.id, a.rollout_id, a.generation, a.stage_ordinal, a.state, a.issued_at, a.expires_at, r.state, r.artifact_id
+		SELECT a.id, a.rollout_id, a.generation, a.kind, a.stage_ordinal, a.state, a.issued_at, a.expires_at, r.state, r.artifact_id
 		FROM assignments a JOIN rollouts r ON r.id = a.rollout_id
 		WHERE a.device_id = $1 AND a.finished_at IS NULL
 		FOR UPDATE OF a`, deviceID).Scan(
-		&a.ID, &a.RolloutID, &a.Generation, &a.Stage, &a.State, &a.IssuedAt, &a.ExpiresAt, &rolloutState, &artifactID)
+		&a.ID, &a.RolloutID, &a.Generation, &a.Kind, &a.Stage, &a.State, &a.IssuedAt, &a.ExpiresAt, &rolloutState, &artifactID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -123,6 +124,7 @@ func issueAssignment(ctx context.Context, tx pgx.Tx, device Device, now time.Tim
 	a := Assignment{
 		DeviceID:   device.ID,
 		Generation: 1,
+		Kind:       "forward",
 		State:      rollout.AssignmentAssigned,
 		IssuedAt:   now,
 		ExpiresAt:  now.Add(lease),
@@ -173,4 +175,28 @@ func supersedeUnstarted(ctx context.Context, tx pgx.Tx, rolloutID string, now ti
 		return fmt.Errorf("supersede assignments: %w", err)
 	}
 	return nil
+}
+
+// ErrNoOpenAssignment reports that a device has no current reason to fetch an artifact.
+var ErrNoOpenAssignment = errors.New("this device has no open assignment for this artifact")
+
+// DeviceArtifact returns an artifact for a device to fetch. It requires an open assignment,
+// so cancelling an assignment also cuts off its download.
+func (s *Store) DeviceArtifact(ctx context.Context, deviceID, artifactID string) (Artifact, error) {
+	if !rollout.ValidUUID(artifactID) {
+		return Artifact{}, notFound("artifact", artifactID)
+	}
+	var assigned bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM assignments a JOIN rollouts r ON r.id = a.rollout_id
+			WHERE a.device_id = $1 AND r.artifact_id = $2 AND a.finished_at IS NULL)`,
+		deviceID, artifactID).Scan(&assigned)
+	if err != nil {
+		return Artifact{}, fmt.Errorf("check assignment: %w", err)
+	}
+	if !assigned {
+		return Artifact{}, ErrNoOpenAssignment
+	}
+	return readArtifact(ctx, s.pool, artifactID)
 }

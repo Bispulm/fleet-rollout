@@ -109,3 +109,86 @@ func TestContextCancelsRequests(t *testing.T) {
 		t.Fatalf("a transport failure was reported as an API error: %v", err)
 	}
 }
+
+func TestRetryClassification(t *testing.T) {
+	api := func(status int) error { return &client.APIError{Problem: apiv1.Problem{Status: status}} }
+	retryable := map[string]error{
+		"transport":    errors.New("connection refused"),
+		"deadline":     context.DeadlineExceeded,
+		"server error": api(http.StatusInternalServerError),
+		"unavailable":  api(http.StatusServiceUnavailable),
+		"bad gateway":  api(http.StatusBadGateway),
+		"rate limited": api(http.StatusTooManyRequests),
+	}
+	for name, err := range retryable {
+		if !client.IsRetryable(err) {
+			t.Errorf("%s should be retryable", name)
+		}
+	}
+	permanent := map[string]error{
+		"no error":     nil,
+		"canceled":     context.Canceled,
+		"unauthorized": api(http.StatusUnauthorized),
+		"forbidden":    api(http.StatusForbidden),
+		"not found":    api(http.StatusNotFound),
+		"conflict":     api(http.StatusConflict),
+		"invalid":      api(http.StatusUnprocessableEntity),
+	}
+	for name, err := range permanent {
+		if client.IsRetryable(err) {
+			t.Errorf("%s should not be retryable", name)
+		}
+	}
+}
+
+func TestRetryAfterIsParsedFromResponses(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "7")
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	_, err := client.New(srv.URL, "t", srv.Client()).GetFleet(t.Context(), "lab-a")
+	if got := client.RetryAfter(err); got != 7*time.Second {
+		t.Fatalf("RetryAfter = %v, want 7s", got)
+	}
+	if !client.IsStatus(err, http.StatusServiceUnavailable) {
+		t.Fatalf("IsStatus = false for %v", err)
+	}
+}
+
+func TestFetchRangeReportsWhatTheServerSaid(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Range"); got != "bytes=1024-2047" {
+			t.Errorf("Range = %q", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer device-token" {
+			t.Errorf("Authorization = %q", got)
+		}
+		w.Header().Set("Content-Range", "bytes 1024-2047/9000")
+		w.Header().Set("ETag", `"sha256:abc"`)
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write([]byte("chunk"))
+	}))
+	defer srv.Close()
+	resp, err := client.NewDevice(srv.URL, "device-token", srv.Client()).FetchRange(t.Context(), "a1", 1024, 1024)
+	if err != nil {
+		t.Fatalf("FetchRange: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusPartialContent || resp.ContentRange != "bytes 1024-2047/9000" || resp.ETag != `"sha256:abc"` {
+		t.Fatalf("response = %+v", resp)
+	}
+}
+
+func TestFetchRangeTurnsErrorsIntoTypedOnes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(apiv1.Problem{Status: http.StatusForbidden, Code: apiv1.CodeNoOpenAssignment})
+	}))
+	defer srv.Close()
+	_, err := client.NewDevice(srv.URL, "t", srv.Client()).FetchRange(t.Context(), "a1", 0, 10)
+	if !client.IsCode(err, apiv1.CodeNoOpenAssignment) {
+		t.Fatalf("error = %v", err)
+	}
+}

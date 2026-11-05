@@ -2,52 +2,66 @@ package api
 
 import (
 	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
-	"regexp"
+	"time"
 
 	"github.com/Bispulm/fleet-rollout/internal/apiv1"
-	"github.com/Bispulm/fleet-rollout/internal/rollout"
+	"github.com/Bispulm/fleet-rollout/internal/signing"
 	"github.com/Bispulm/fleet-rollout/internal/store"
 )
 
-// sha256Hex accepts only the canonical lowercase form, so one digest has one spelling.
-var sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
+const (
+	defaultMaxArtifactBytes = 1 << 30
+	uploadTimeout           = 30 * time.Minute
+	// downloadChunkTimeout bounds serving one Range request, however slow the device.
+	downloadChunkTimeout = 5 * time.Minute
+	// maxEnvelopeRequestBytes leaves room for the request's JSON around the envelope.
+	maxEnvelopeRequestBytes = signing.MaxEnvelopeBytes + 1024
+)
 
 func (s *Server) handleCreateArtifact(w http.ResponseWriter, r *http.Request) error {
 	var req apiv1.CreateArtifactRequest
-	if err := decodeJSON(w, r, &req); err != nil {
+	if err := decodeJSONLimit(w, r, &req, maxEnvelopeRequestBytes); err != nil {
 		return err
 	}
-	switch {
-	case !rollout.ValidName(req.Name):
-		return invalid("name", "must be lowercase letters, digits, and hyphens, at most 63 characters")
-	case !rollout.ValidVersion(req.Version):
-		return invalid("version", "must be letters, digits, '.', '_', '+', and '-', at most 64 characters")
-	case !rollout.ValidPlatform(req.Platform):
-		return invalid("platform", "must have the form os/arch")
-	case req.ReleaseCounter < 1:
-		return invalid("release_counter", "must be at least 1")
-	case req.SizeBytes < 1:
-		return invalid("size_bytes", "must be at least 1")
-	case !sha256Hex.MatchString(req.SHA256):
-		return invalid("sha256", "must be 64 lowercase hex characters")
-	}
-	artifact := store.NewArtifact{
-		Name:           req.Name,
-		Version:        req.Version,
-		Platform:       req.Platform,
-		ReleaseCounter: req.ReleaseCounter,
-		SizeBytes:      req.SizeBytes,
-		ChunkSize:      1 << 20,
-	}
-	if _, err := hex.Decode(artifact.SHA256[:], []byte(req.SHA256)); err != nil {
-		return invalid("sha256", "must be 64 lowercase hex characters")
-	}
-	created, _, err := s.store.RegisterArtifact(r.Context(), artifact)
+	manifest, err := s.trust.Verify(req.Envelope)
 	if err != nil {
 		return err
 	}
-	writeJSON(w, http.StatusCreated, artifactDocument(created))
+	if manifest.SizeBytes > s.maxArtifactBytes {
+		return invalid("envelope", fmt.Sprintf("the artifact is %d bytes, above the limit of %d", manifest.SizeBytes, s.maxArtifactBytes))
+	}
+	envelope, err := json.Marshal(req.Envelope)
+	if err != nil {
+		return fmt.Errorf("encode envelope: %w", err)
+	}
+	digest, err := hex.DecodeString(manifest.SHA256)
+	if err != nil {
+		return fmt.Errorf("decode digest: %w", err)
+	}
+	artifact := store.NewArtifact{
+		Name:           manifest.Name,
+		Version:        manifest.Version,
+		Platform:       manifest.Platform,
+		ReleaseCounter: manifest.ReleaseCounter,
+		SizeBytes:      manifest.SizeBytes,
+		ChunkSize:      manifest.ChunkSize,
+		Envelope:       envelope,
+	}
+	copy(artifact.SHA256[:], digest)
+
+	registered, created, err := s.store.RegisterArtifact(r.Context(), artifact)
+	if err != nil {
+		return err
+	}
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, artifactDocument(registered))
 	return nil
 }
 
@@ -60,6 +74,84 @@ func (s *Server) handleGetArtifact(w http.ResponseWriter, r *http.Request) error
 	return nil
 }
 
+// handleUploadContent stores an artifact's bytes, once they've proved to be exactly what
+// its signed manifest describes. Repeating a finished upload changes nothing.
+func (s *Server) handleUploadContent(w http.ResponseWriter, r *http.Request) error {
+	artifact, err := s.store.GetArtifact(r.Context(), r.PathValue("id"))
+	if err != nil {
+		return err
+	}
+	if artifact.ContentReadyAt != nil {
+		w.WriteHeader(http.StatusNoContent)
+		return nil
+	}
+	envelope, err := signing.ParseEnvelope(artifact.Envelope)
+	if err != nil {
+		return fmt.Errorf("parse stored envelope: %w", err)
+	}
+	manifest, err := s.trust.Verify(envelope)
+	if err != nil {
+		return err
+	}
+
+	// The server's read deadline is meant for ordinary requests, not large uploads. The
+	// request's own context still bounds this one.
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(uploadTimeout))
+	body := http.MaxBytesReader(w, r.Body, manifest.SizeBytes+1)
+	err = s.artifacts.Put(r.Context(), artifact.ID, body, manifest.CheckContent)
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		return fmt.Errorf("%w: more bytes than the manifest describes", signing.ErrContentMismatch)
+	}
+	if err != nil {
+		return err
+	}
+	if err := s.store.MarkArtifactContentReady(r.Context(), artifact.ID); err != nil {
+		return err
+	}
+	w.WriteHeader(http.StatusNoContent)
+	return nil
+}
+
+func (s *Server) handleDeviceManifest(w http.ResponseWriter, r *http.Request, device store.Device) error {
+	artifact, err := s.store.DeviceArtifact(r.Context(), device.ID, r.PathValue("id"))
+	if err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	_, err = w.Write(artifact.Envelope)
+	if err != nil {
+		return nil //nolint:nilerr // The client went away, and there's nobody left to tell.
+	}
+	return nil
+}
+
+// handleDeviceContent serves artifact bytes with Range support. The ETag names the content's
+// digest, so a device can tell whether it's still getting the same artifact. A device trusts
+// none of this, though: it checks every chunk against its signed manifest.
+func (s *Server) handleDeviceContent(w http.ResponseWriter, r *http.Request, device store.Device) error {
+	artifact, err := s.store.DeviceArtifact(r.Context(), device.ID, r.PathValue("id"))
+	if err != nil {
+		return err
+	}
+	object, err := s.artifacts.Open(r.Context(), artifact.ID)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = object.Close() }()
+
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(downloadChunkTimeout))
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("ETag", artifactETag(artifact))
+	http.ServeContent(w, r, "", time.Time{}, object)
+	return nil
+}
+
+func artifactETag(a store.Artifact) string {
+	return `"sha256:` + hex.EncodeToString(a.SHA256[:]) + `"`
+}
+
 func artifactDocument(a store.Artifact) apiv1.Artifact {
 	return apiv1.Artifact{
 		ID:             a.ID,
@@ -69,6 +161,8 @@ func artifactDocument(a store.Artifact) apiv1.Artifact {
 		ReleaseCounter: a.ReleaseCounter,
 		SizeBytes:      a.SizeBytes,
 		SHA256:         hex.EncodeToString(a.SHA256[:]),
+		ChunkSize:      a.ChunkSize,
+		ContentReady:   a.ContentReadyAt != nil,
 		CreatedAt:      a.CreatedAt,
 	}
 }
