@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"runtime/debug"
 	"time"
+
+	"github.com/Bispulm/fleet-rollout/internal/metrics"
 )
 
 const requestIDHeader = "X-Request-Id"
@@ -51,7 +53,7 @@ func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter 
 
 // observe assigns a request ID, recovers from panics, and writes the access log.
 // Panics are logged in full but never reach the client.
-func observe(logger *slog.Logger, next http.Handler) http.Handler {
+func observe(logger *slog.Logger, m *metrics.Metrics, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		id := r.Header.Get(requestIDHeader)
@@ -76,6 +78,7 @@ func observe(logger *slog.Logger, next http.Handler) http.Handler {
 					writeProblem(rec, http.StatusInternalServerError, "")
 				}
 			}
+			m.Request(r.Pattern, r.Method, rec.status, time.Since(start))
 			logger.LogAttrs(r.Context(), slog.LevelInfo, "request",
 				slog.String("request_id", id),
 				slog.String("method", r.Method),

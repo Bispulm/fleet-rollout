@@ -12,7 +12,10 @@ import (
 )
 
 const (
-	defaultListenAddr        = "127.0.0.1:18100"
+	defaultListenAddr  = "127.0.0.1:18100"
+	defaultMetricsAddr = "127.0.0.1:18102"
+	// metricsOff turns the metrics listener off.
+	metricsOff               = "off"
 	defaultShutdownTimeout   = 15 * time.Second
 	defaultDBMaxConns        = 16
 	minAdminTokenLength      = 16
@@ -29,7 +32,9 @@ const (
 
 // Config holds the settings for the rolloutd server.
 type Config struct {
-	ListenAddr      string
+	ListenAddr string
+	// MetricsAddr is where Prometheus metrics are served, or empty for nowhere.
+	MetricsAddr     string
 	DatabaseURL     string
 	AdminToken      string
 	LogLevel        slog.Level
@@ -54,6 +59,7 @@ type Config struct {
 func Load(getenv func(string) string) (Config, error) {
 	cfg := Config{
 		ListenAddr:      defaultListenAddr,
+		MetricsAddr:     defaultMetricsAddr,
 		LogLevel:        slog.LevelInfo,
 		ShutdownTimeout: defaultShutdownTimeout,
 		DBMaxConns:      defaultDBMaxConns,
@@ -86,6 +92,18 @@ func Load(getenv func(string) string) (Config, error) {
 	allowNonLoopback := getenv("ROLLOUTD_ALLOW_NON_LOOPBACK") == "true"
 	if err := checkListenAddr(cfg.ListenAddr, allowNonLoopback); err != nil {
 		problems = append(problems, err)
+	}
+	switch v := getenv("ROLLOUTD_METRICS_ADDR"); v {
+	case "":
+	case metricsOff:
+		cfg.MetricsAddr = ""
+	default:
+		cfg.MetricsAddr = v
+	}
+	if cfg.MetricsAddr != "" {
+		if err := checkListenAddr(cfg.MetricsAddr, allowNonLoopback); err != nil {
+			problems = append(problems, fmt.Errorf("ROLLOUTD_METRICS_ADDR: %w", err))
+		}
 	}
 
 	if v := getenv("ROLLOUTD_LOG_LEVEL"); v != "" {

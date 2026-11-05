@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/Bispulm/fleet-rollout/internal/metrics"
+	"github.com/Bispulm/fleet-rollout/internal/rollout"
 	"github.com/Bispulm/fleet-rollout/internal/store"
 )
 
@@ -37,6 +39,8 @@ type Options struct {
 	Interval time.Duration
 	LeaseTTL time.Duration
 	Logger   *slog.Logger
+	// Metrics, if set, counts decisions and halts, and records leadership.
+	Metrics *metrics.Metrics
 }
 
 // Engine runs the evaluation loop. Run and Tick must not be called concurrently.
@@ -46,6 +50,7 @@ type Engine struct {
 	interval time.Duration
 	leaseTTL time.Duration
 	logger   *slog.Logger
+	metrics  *metrics.Metrics
 	fence    *store.Fence
 }
 
@@ -57,6 +62,7 @@ func New(opts Options) *Engine {
 		interval: opts.Interval,
 		leaseTTL: opts.LeaseTTL,
 		logger:   opts.Logger,
+		metrics:  opts.Metrics,
 	}
 }
 
@@ -117,9 +123,11 @@ func (e *Engine) ensureLease(ctx context.Context) bool {
 		return false
 	}
 	if !acquired {
+		e.metrics.Leading(false)
 		return false
 	}
 	e.fence = &fence
+	e.metrics.Leading(true)
 	e.logger.LogAttrs(ctx, slog.LevelInfo, "became engine leader",
 		slog.String("holder", fence.Holder), slog.Int64("generation", fence.Generation))
 	return true
@@ -129,6 +137,7 @@ func (e *Engine) dropLease(ctx context.Context, cause error) {
 	e.logger.LogAttrs(ctx, slog.LevelWarn, "no longer certain of engine leadership",
 		slog.Int64("generation", e.fence.Generation), slog.Any("error", cause))
 	e.fence = nil
+	e.metrics.Leading(false)
 }
 
 // advance evaluates one rollout until it settles, so that a stage with no soak moves
@@ -149,6 +158,10 @@ func (e *Engine) advance(ctx context.Context, id string) bool {
 		}
 		if !result.Changed {
 			return true
+		}
+		e.metrics.Decision(string(result.Event), string(result.HaltReason))
+		if result.RolledBack {
+			e.metrics.Decision(string(rollout.EventRollback), "")
 		}
 		e.logger.LogAttrs(ctx, slog.LevelInfo, "rollout changed",
 			slog.String("rollout_id", id),

@@ -20,6 +20,10 @@ type AdvanceResult struct {
 	To      rollout.State
 	Stage   int
 	Detail  string
+	// HaltReason says why, if the rollout halted.
+	HaltReason rollout.HaltReason
+	// RolledBack means a halt went straight on to a rollback, as the policy said.
+	RolledBack bool
 }
 
 // ListActiveRollouts returns the rollouts the engine must evaluate. Paused rollouts
@@ -113,6 +117,7 @@ func (s *Store) AdvanceRollout(ctx context.Context, id string, fence Fence) (Adv
 			return err
 		}
 		result.To = rollout.StateRollingBack
+		result.RolledBack = true
 		return nil
 	})
 	if err != nil {
@@ -245,7 +250,7 @@ func halt(ctx context.Context, tx pgx.Tx, r Rollout, verdict rollout.Verdict, no
 		WHERE id = $1`, r.ID, to, string(verdict.Reason), verdict.Detail); err != nil {
 		return AdvanceResult{}, fmt.Errorf("halt rollout: %w", err)
 	}
-	return AdvanceResult{Event: rollout.EventBreach, To: to, Detail: string(verdict.Reason) + ": " + verdict.Detail}, nil
+	return AdvanceResult{Event: rollout.EventBreach, To: to, Detail: string(verdict.Reason) + ": " + verdict.Detail, HaltReason: verdict.Reason}, nil
 }
 
 func derefStage(stage *int) int {

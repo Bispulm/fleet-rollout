@@ -384,3 +384,33 @@ func loadCandidates(ctx context.Context, tx pgx.Tx, fleetID string) ([]rollout.C
 	}
 	return candidates, nil
 }
+
+// RecentRollouts returns every rollout that has started and hasn't finished, and those that
+// finished within the window, oldest first. Metrics report them.
+func (s *Store) RecentRollouts(ctx context.Context, window time.Duration) ([]Rollout, error) {
+	var out []Rollout
+	err := s.inTx(ctx, func(tx pgx.Tx) error {
+		now := s.now()
+		rows, err := tx.Query(ctx, `
+			SELECT id FROM rollouts
+			WHERE state <> 'draft' AND (finished_at IS NULL OR finished_at > $1)
+			ORDER BY started_at, id`, now.Add(-window))
+		if err != nil {
+			return fmt.Errorf("query recent rollouts: %w", err)
+		}
+		ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return fmt.Errorf("query recent rollouts: %w", err)
+		}
+		out = make([]Rollout, 0, len(ids))
+		for _, id := range ids {
+			r, err := readRollout(ctx, tx, id, now)
+			if err != nil {
+				return err
+			}
+			out = append(out, r)
+		}
+		return nil
+	})
+	return out, err
+}

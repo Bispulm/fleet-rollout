@@ -13,6 +13,7 @@ import (
 
 	"github.com/Bispulm/fleet-rollout/internal/artifactstore"
 	"github.com/Bispulm/fleet-rollout/internal/auth"
+	"github.com/Bispulm/fleet-rollout/internal/metrics"
 	"github.com/Bispulm/fleet-rollout/internal/signing"
 	"github.com/Bispulm/fleet-rollout/internal/store"
 )
@@ -44,6 +45,8 @@ type Options struct {
 	// MaxDeviceDownloads bounds artifact downloads in the same way, separately, so that slow
 	// downloads can't crowd out the reports of devices already installing.
 	MaxDeviceDownloads int
+	// Metrics, if set, counts requests, shed requests, and reports.
+	Metrics *metrics.Metrics
 }
 
 // Server is the HTTP API. It is safe for concurrent use.
@@ -62,6 +65,7 @@ type Server struct {
 	maxArtifactBytes int64
 	deviceSlots      chan struct{}
 	downloadSlots    chan struct{}
+	metrics          *metrics.Metrics
 }
 
 // New builds a Server with its routes registered.
@@ -76,6 +80,7 @@ func New(opts Options) *Server {
 		trust:            opts.Trust,
 		artifacts:        opts.Artifacts,
 		maxArtifactBytes: opts.MaxArtifactBytes,
+		metrics:          opts.Metrics,
 	}
 	if s.maxArtifactBytes == 0 {
 		s.maxArtifactBytes = defaultMaxArtifactBytes
@@ -93,7 +98,7 @@ func New(opts Options) *Server {
 	if s.pollInterval == 0 {
 		s.pollInterval = defaultPollInterval
 	}
-	s.handler = observe(s.logger, http.HandlerFunc(s.route))
+	s.handler = observe(s.logger, s.metrics, http.HandlerFunc(s.route))
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
 	if opts.Store != nil {

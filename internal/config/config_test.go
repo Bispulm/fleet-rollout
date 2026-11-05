@@ -227,3 +227,21 @@ func TestLoadDeviceLimits(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadMetricsAddress(t *testing.T) {
+	cfg, err := Load(env(nil))
+	if err != nil || cfg.MetricsAddr != "127.0.0.1:18102" {
+		t.Fatalf("default = %q, %v", cfg.MetricsAddr, err)
+	}
+	if cfg, err = Load(env(map[string]string{"ROLLOUTD_METRICS_ADDR": "off"})); err != nil || cfg.MetricsAddr != "" {
+		t.Fatalf("off = %q, %v", cfg.MetricsAddr, err)
+	}
+	if _, err = Load(env(map[string]string{"ROLLOUTD_METRICS_ADDR": "0.0.0.0:18102"})); err == nil ||
+		!strings.Contains(err.Error(), "ROLLOUTD_METRICS_ADDR") {
+		t.Fatalf("a non-loopback address without permission: error = %v", err)
+	}
+	cfg, err = Load(env(map[string]string{"ROLLOUTD_METRICS_ADDR": "0.0.0.0:18102", "ROLLOUTD_ALLOW_NON_LOOPBACK": "true"}))
+	if err != nil || cfg.MetricsAddr != "0.0.0.0:18102" {
+		t.Fatalf("with permission = %q, %v", cfg.MetricsAddr, err)
+	}
+}
