@@ -340,6 +340,9 @@ func (a *app) printRollout(r apiv1.Rollout) error {
 	if r.HaltReason != "" {
 		row("Halted", r.HaltReason+": "+r.HaltDetail)
 	}
+	if len(r.FailureReasons) > 0 {
+		row("Failures", formatCounts(r.FailureReasons))
+	}
 	if rb := r.Rollback; rb != nil {
 		line := fmt.Sprintf("attempt %d: %d of %d devices restored, %d failed, %d unresolved",
 			rb.Attempt, rb.Restored, rb.Needed, rb.Failed, rb.Unresolved)
@@ -395,6 +398,25 @@ func formatExclusions(counts map[rollout.ExclusionReason]int) string {
 	parts := make([]string, len(reasons))
 	for i, reason := range reasons {
 		parts[i] = fmt.Sprintf("%s=%d", reason, counts[reason])
+	}
+	return strings.Join(parts, ", ")
+}
+
+// formatCounts lists counts by name, most first.
+func formatCounts(counts map[string]int) string {
+	names := make([]string, 0, len(counts))
+	for name := range counts {
+		names = append(names, name)
+	}
+	slices.SortFunc(names, func(a, b string) int {
+		if counts[a] != counts[b] {
+			return counts[b] - counts[a]
+		}
+		return strings.Compare(a, b)
+	})
+	parts := make([]string, len(names))
+	for i, name := range names {
+		parts[i] = fmt.Sprintf("%s %d", name, counts[name])
 	}
 	return strings.Join(parts, ", ")
 }

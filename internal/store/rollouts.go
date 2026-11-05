@@ -87,6 +87,8 @@ type Rollout struct {
 	HaltDetail *string
 	// Rollback is the rollback's progress, once one has started.
 	Rollback *RollbackProgress
+	// FailureReasons counts the devices whose install failed, by the reason they gave.
+	FailureReasons map[string]int
 	// Waiting explains what an active rollout needs before it can move on, using the
 	// same evaluation the engine decides with.
 	Waiting string
@@ -285,6 +287,9 @@ func readRollout(ctx context.Context, tx pgx.Tx, id string, now time.Time) (Roll
 			r.Waiting = r.Policy.Evaluate(r.evaluation(now)).Waiting
 		}
 	}
+	if r.FailureReasons, err = readFailureReasons(ctx, tx, id); err != nil {
+		return Rollout{}, err
+	}
 	if rollbackAttempt > 0 {
 		if r.Rollback, err = readRollback(ctx, tx, id, rollbackAttempt, rollbackDeadline); err != nil {
 			return Rollout{}, err
@@ -413,4 +418,28 @@ func (s *Store) RecentRollouts(ctx context.Context, window time.Duration) ([]Rol
 		return nil
 	})
 	return out, err
+}
+
+// readFailureReasons counts failed forward installs by the reason each device reported, from the
+// failure report the server applied.
+func readFailureReasons(ctx context.Context, tx pgx.Tx, id string) (map[string]int, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT coalesce(nullif(e.payload->>'reason', ''), 'unspecified'), count(DISTINCT a.id)
+		FROM assignments a
+		JOIN device_events e ON e.assignment_id = a.id AND e.type = 'failed' AND e.applied
+		WHERE a.rollout_id = $1 AND a.kind = 'forward' AND a.state = 'failed'
+		GROUP BY 1`, id)
+	if err != nil {
+		return nil, fmt.Errorf("query failure reasons: %w", err)
+	}
+	out := map[string]int{}
+	var reason string
+	var count int
+	if _, err := pgx.ForEachRow(rows, []any{&reason, &count}, func() error {
+		out[reason] = count
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("query failure reasons: %w", err)
+	}
+	return out, nil
 }

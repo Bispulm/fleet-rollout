@@ -183,6 +183,8 @@ type Rollout struct {
 	Waiting string `json:"waiting,omitempty"`
 	// Rollback is the rollback's progress, once one has started.
 	Rollback *RollbackProgress `json:"rollback,omitempty"`
+	// FailureReasons counts the devices whose install failed, by the reason they gave.
+	FailureReasons map[string]int `json:"failure_reasons,omitempty"`
 }
 
 // TransitionRequest is the optional body of a rollout state change. Set

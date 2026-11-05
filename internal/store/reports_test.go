@@ -403,3 +403,26 @@ func TestAnInstallClaimWaitsForAPauseInProgress(t *testing.T) {
 		})
 	}
 }
+
+func TestFailuresAreCountedByTheReasonDevicesGave(t *testing.T) {
+	s, ctx := newStore(t)
+	_, r := startedWorld(t, ctx, s, 20) // Stage 1 has two devices.
+	for i, reason := range []string{"unhealthy", "interrupted"} {
+		device := memberAt(t, ctx, s, r.ID, i+1)
+		a := poll(t, ctx, s, device)
+		failure := reportFor(device, a, 1, rollout.AssignmentFailed)
+		failure.Reason = reason
+		for range 2 { // A retry of the same report mustn't count twice.
+			if _, err := s.RecordReport(ctx, failure); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	got, err := s.GetRollout(ctx, r.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.FailureReasons) != 2 || got.FailureReasons["unhealthy"] != 1 || got.FailureReasons["interrupted"] != 1 {
+		t.Fatalf("failure reasons = %v, want one of each", got.FailureReasons)
+	}
+}

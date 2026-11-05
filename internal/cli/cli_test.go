@@ -545,7 +545,7 @@ func TestStatusExplainsProgressAndHalts(t *testing.T) {
 	}
 
 	status := e.mustRun("rollout", "status", r.ID)
-	for _, want := range []string{"halted", "Halted:", "stage_breach", "FAILED", "failed"} {
+	for _, want := range []string{"halted", "Halted:", "stage_breach", "FAILED", "failed", "Failures:", "health check failed 1"} {
 		if !strings.Contains(status, want) {
 			t.Errorf("status is missing %q:\n%s", want, status)
 		}

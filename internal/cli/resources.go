@@ -259,9 +259,13 @@ func (a *app) deviceListCommand() *cobra.Command {
 				return a.printJSON(page)
 			}
 			table := a.table()
-			_, _ = fmt.Fprintln(table, "DEVICE\tPLATFORM\tSTATUS\tRELEASE")
+			_, _ = fmt.Fprintln(table, "DEVICE\tPLATFORM\tSTATUS\tRELEASE\tLAST SEEN")
 			for _, d := range page.Devices {
-				_, _ = fmt.Fprintf(table, "%s\t%s\t%s\t%d\n", d.ID, d.Platform, d.Status, d.InstalledRelease)
+				lastSeen := "never"
+				if d.LastSeenAt != nil {
+					lastSeen = d.LastSeenAt.Format(timeLayout)
+				}
+				_, _ = fmt.Fprintf(table, "%s\t%s\t%s\t%d\t%s\n", d.ID, d.Platform, d.Status, d.InstalledRelease, lastSeen)
 			}
 			if err := table.Flush(); err != nil {
 				return err
