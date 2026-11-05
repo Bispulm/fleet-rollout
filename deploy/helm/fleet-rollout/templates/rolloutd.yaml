@@ -65,6 +65,21 @@ spec:
     - name: http
       port: {{ .Values.rolloutd.service.port }}
       targetPort: http
+---
+# Metrics have a Service of their own, always internal to the cluster, so that exposing the API
+# by changing its Service's type doesn't expose them too.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "fleet-rollout.name" . }}-rolloutd-metrics
+  labels:
+    {{- include "fleet-rollout.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "fleet-rollout.selector" . | nindent 4 }}
+    app.kubernetes.io/component: rolloutd
+  ports:
     - name: metrics
       port: {{ .Values.rolloutd.metricsPort }}
       targetPort: metrics

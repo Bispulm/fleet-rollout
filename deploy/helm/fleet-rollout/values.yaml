@@ -37,8 +37,8 @@ rolloutd:
   maxDeviceRequests: 256
   maxDeviceDownloads: 128
   logLevel: info
-  # Prometheus metrics are served here, apart from the API, and the pods carry the usual
-  # prometheus.io scrape annotations.
+  # Prometheus metrics are served here, apart from the API, through a ClusterIP Service of their
+  # own, and the pods carry the usual prometheus.io scrape annotations.
   metricsPort: 18102
   service:
     type: ClusterIP
