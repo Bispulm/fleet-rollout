@@ -263,6 +263,66 @@ the release afterward, and any assignment that hasn't reached installation is su
 stand in the way of later work. A follow-up rollout of the same artifact covers these devices, since
 members already on that release are excluded from it as `already_current`.
 
+## Artifacts and devices
+
+**Status: Specified.**
+
+### What a device checks
+
+Before installing, a device verifies all of these, and any failure is permanent: it reports `failed` with a reason and
+installs nothing.
+
+1. The manifest's signature, from a key on the device's own trust list.
+2. That the manifest matches what the assignment describes, and the device's platform.
+3. The size, against the manifest and against the device's own limit.
+4. Every chunk's digest as it arrives, and the full digest at the end.
+5. Downgrade protection: the release counter must be above what's running. If it's equal and the digest matches,
+   the device already has this release, and reports success without reinstalling. Anything else is rejected.
+
+### Downloads
+
+A partial download only ever contains verified chunks, because a chunk is checked before it's kept. A response has to
+be `206`, with a `Content-Range` starting at the requested offset, a total matching the manifest, and an `ETag` naming
+the expected digest.
+
+| What goes wrong | What the device does |
+|---|---|
+| Connection drops, or a server error | Retry from the last verified chunk, with backoff and jitter |
+| Server ignores the Range request and sends `200` | Discard the response and retry. After repeated attempts, start the download over from byte 0 |
+| A different `ETag`, offset, or total | Discard the response and count an integrity strike |
+| A chunk fails its digest | Discard the chunk and count an integrity strike |
+| Too many integrity strikes | Report `failed`, and install nothing |
+| No longer assigned, or a `403` | Abandon the download and delete the partial data |
+
+The server only serves an artifact to a device with an open assignment for it, so superseding an assignment also cuts
+off the download.
+
+### Retries
+
+Network failures, `429`, and `5xx` are retried with exponential backoff and full jitter, respecting `Retry-After`.
+Authentication, integrity, and policy failures aren't retried as if they were transient. A `401` means the device can't
+do anything useful, so it slows to its longest backoff and keeps its state.
+
+### Crashes
+
+Everything needed to recover is saved atomically before it's acted on: the assignment, verified download progress, the
+active and pending slots, the previous healthy artifact, the report sequence, and reports not yet acknowledged.
+
+| Crash during | On restart |
+|---|---|
+| Downloading | Discard anything past the last verified chunk, and continue |
+| Verifying | Verify again from the start |
+| Installing or health check | The new slot can't be trusted. Keep the previous one, and report `reverting` then `failed` |
+| Reverting | Finish reverting |
+| After recording success | The new slot is active. Send any reports still outstanding |
+| Between sending a report and recording that it was acknowledged | Send it again. The server treats it as a duplicate |
+
+### Simulator faults
+
+The simulator injects disconnects, latency, corrupted downloads, offline intervals, crashes, unhealthy releases, duplicate
+reports, and reconnect storms. See [ADR 0008](adr/0008-step-driven-agent-and-simulator.md) for what a seed does and
+doesn't reproduce.
+
 ## Rollback
 
 **Status: Specified.** Until it's built, a policy with `on_breach: rollback` is rejected at creation rather
