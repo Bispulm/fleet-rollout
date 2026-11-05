@@ -44,8 +44,9 @@ func newFixture(t *testing.T, ctx context.Context) fixture {
 	mustScan(t, f.pool.QueryRow(ctx, `INSERT INTO fleets (name) VALUES ('lab-a') RETURNING id`), &f.fleetID)
 	mustExec(t, ctx, f.pool, `INSERT INTO devices (id, fleet_id, platform, credential_hash)
 		VALUES ($1, $2, 'linux/arm64', sha256($1::text::bytea))`, f.deviceID, f.fleetID)
-	mustScan(t, f.pool.QueryRow(ctx, `INSERT INTO artifacts (name, version, platform, release_counter, size_bytes, sha256)
-		VALUES ('demo', '1.0.0', 'linux/arm64', 10, 1024, $1) RETURNING id`, make([]byte, 32)), &f.artifact)
+	mustScan(t, f.pool.QueryRow(ctx, `INSERT INTO artifacts
+		(name, version, platform, release_counter, size_bytes, sha256, envelope, chunk_size, content_ready_at)
+		VALUES ('demo', '1.0.0', 'linux/arm64', 10, 1024, $1, '{}', 1024, now()) RETURNING id`, make([]byte, 32)), &f.artifact)
 	f.rolloutID = f.insertRollout(t, ctx, "first")
 	for ordinal, percent := range map[int]int{1: 50, 2: 100} {
 		mustExec(t, ctx, f.pool, `INSERT INTO rollout_stages (rollout_id, ordinal, percent) VALUES ($1, $2, $3)`,
@@ -463,5 +464,16 @@ func TestStagePercentCannotChangeEvenInDraft(t *testing.T) {
 	f := newFixture(t, ctx)
 	// The policy is immutable from creation, and percent is part of it.
 	_, err := f.pool.Exec(ctx, `UPDATE rollout_stages SET percent = 99 WHERE rollout_id = $1 AND ordinal = 1`, f.rolloutID)
+	requireSQLState(t, err, sqlRestrictViolation)
+}
+
+func TestRolloutsCannotUseAnArtifactWithoutItsContent(t *testing.T) {
+	ctx := testContext(t)
+	f := newFixture(t, ctx)
+	var unready string
+	mustScan(t, f.pool.QueryRow(ctx, `INSERT INTO artifacts (name, version, platform, release_counter, size_bytes, sha256, envelope, chunk_size)
+		VALUES ('demo', '2.0.0', 'linux/arm64', 20, 1024, $1, '{}', 1024) RETURNING id`, make([]byte, 32)), &unready)
+	_, err := f.pool.Exec(ctx, `INSERT INTO rollouts (fleet_id, artifact_id, name, policy, policy_digest, created_at)
+		VALUES ($1, $2, 'unready', '{}', $3, now())`, f.fleetID, unready, make([]byte, 32))
 	requireSQLState(t, err, sqlRestrictViolation)
 }
