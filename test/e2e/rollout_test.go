@@ -1,6 +1,7 @@
 // Package e2e drives whole rollouts through the real HTTP API, store, and engine on real
-// Postgres. Time comes from a fake clock and the engine is ticked by hand, so scenarios
-// are exact and fast. Devices here are scripted, because the real agent doesn't exist yet.
+// Postgres. Most scenarios script their devices, take time from a fake clock, and tick the
+// engine by hand, so they're exact and fast. One runs the real agent binary in real time
+// instead, and kills it partway through.
 package e2e
 
 import (
@@ -80,7 +81,8 @@ type fixture struct {
 func newFixture(t *testing.T, devices int) *fixture {
 	t.Helper()
 	t.Parallel()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	// This only stops a hung scenario. A machine under load can take most of a minute.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	t.Cleanup(cancel)
 	artifacts, err := artifactstore.NewFilesystem(t.TempDir())
 	if err != nil {
