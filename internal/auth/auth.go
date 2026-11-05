@@ -47,7 +47,7 @@ func NewAdminVerifier(token string) AdminVerifier {
 // compares hashes in constant time, so timing reveals nothing about the token.
 func (v AdminVerifier) Verify(header string) bool {
 	token, ok := strings.CutPrefix(header, bearerPrefix)
-	if !ok {
+	if !ok || token == "" {
 		return false
 	}
 	hash := HashToken(token)

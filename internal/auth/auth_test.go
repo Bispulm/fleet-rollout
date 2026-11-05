@@ -47,3 +47,17 @@ func TestAdminVerifier(t *testing.T) {
 		}
 	}
 }
+
+func TestAdminVerifierNeverAcceptsAnEmptyToken(t *testing.T) {
+	for name, verifier := range map[string]AdminVerifier{
+		"configured empty": NewAdminVerifier(""),
+		"zero value":       {},
+		"configured":       NewAdminVerifier("something"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if verifier.Verify("Bearer ") {
+				t.Fatal("accepted an empty bearer token")
+			}
+		})
+	}
+}
