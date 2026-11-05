@@ -448,6 +448,9 @@ func (a *Agent) flush(ctx context.Context, now time.Time) error {
 		switch {
 		case err == nil:
 			a.failures = 0
+		case ctx.Err() != nil:
+			// The agent is stopping, which says nothing about the report. It goes next time.
+			return nil //nolint:nilerr // Stopping isn't a failure of the report.
 		case client.IsRetryable(err) || client.IsStatus(err, http.StatusUnauthorized):
 			a.nextFlush = now.Add(a.networkFailure(err))
 			return nil
@@ -843,6 +846,9 @@ func (a *Agent) stepClaim(ctx context.Context, now time.Time) (time.Duration, er
 		next.Work.Claim = nil
 		next.Work.Held = true
 		return a.untilNextPoll(now), a.commit(next)
+	case err != nil && ctx.Err() != nil:
+		// The agent is stopping. The same request goes again when it starts.
+		return 0, nil //nolint:nilerr // Stopping isn't a refusal.
 	case err == nil:
 		// The assignment is over, as far as the server is concerned.
 		a.failures = 0

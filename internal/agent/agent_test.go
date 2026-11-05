@@ -1029,6 +1029,55 @@ func TestReportsStayInOrderAcrossFailures(t *testing.T) {
 	}
 }
 
+// stopping returns a context that's already been cancelled, as a shutdown would leave it,
+// and makes the transport fail the way the client does when its context is cancelled.
+func stopping(f *fixture) context.Context {
+	ctx, cancel := context.WithCancel(f.ctx)
+	cancel()
+	f.server.reportErr = fmt.Errorf("POST /v1/device/reports: %w", context.Canceled)
+	return ctx
+}
+
+func TestStoppingWhileReportingKeepsTheReports(t *testing.T) {
+	f := newFixture(t)
+	f.runUntil("installing", atPhase(f, agent.PhaseInstalling))
+	ctx := stopping(f)
+	for range 10 {
+		if _, err := f.agent.Step(ctx); err != nil {
+			t.Fatalf("Step: %v", err)
+		}
+	}
+	if cp := f.agent.Checkpoint(); cp.Work != nil || len(cp.Outbox) != 2 {
+		t.Fatalf("checkpoint = %+v, want the install done and its two reports kept", cp)
+	}
+
+	f.server.reportErr = nil
+	f.restart()
+	f.runToIdle()
+	if got := f.server.accepted(); !slices.Equal(got, healthyPath) {
+		t.Fatalf("accepted = %v, want %v", got, healthyPath)
+	}
+}
+
+func TestStoppingWhileAskingToInstallKeepsTheDownload(t *testing.T) {
+	f := newFixture(t)
+	f.runUntil("ready to install", atPhase(f, agent.PhaseReady))
+	ctx := stopping(f)
+	if _, err := f.agent.Step(ctx); err != nil {
+		t.Fatalf("Step: %v", err)
+	}
+	if work := f.agent.Checkpoint().Work; work == nil || work.Phase != agent.PhaseReady || !f.partials.Exists("artifact-1") {
+		t.Fatalf("work = %+v, want it still ready, with its download", work)
+	}
+
+	f.server.reportErr = nil
+	f.restart()
+	f.runToIdle()
+	if f.installer.Installs() != 1 || f.server.bytesServed != int64(len(f.server.content)) {
+		t.Fatalf("installs = %d, bytes served = %d; want one install from one download", f.installer.Installs(), f.server.bytesServed)
+	}
+}
+
 func TestPermanentReportFailuresAreDroppedAndStopAnInstall(t *testing.T) {
 	f := newFixture(t)
 	f.server.reportErr = &client.APIError{Problem: apiv1.Problem{Status: http.StatusConflict, Code: apiv1.CodeReportConflict}}
