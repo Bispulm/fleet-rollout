@@ -25,6 +25,10 @@ test: ## Run unit tests; database tests skip without a database
 test-integration: ## Run all tests with the race detector against local Postgres
 	ROLLOUT_TEST_DATABASE_URL='$(TEST_DATABASE_URL)' ROLLOUT_TEST_REQUIRE_DB=1 go test -race -count=1 ./...
 
+.PHONY: test-kind
+test-kind: ## Run rollouts end to end on a local kind cluster (deletes it after unless KEEP_CLUSTER=1)
+	test/kind/run.sh
+
 .PHONY: lint
 lint: ## Run golangci-lint
 	golangci-lint run ./...
