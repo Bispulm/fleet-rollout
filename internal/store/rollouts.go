@@ -340,13 +340,17 @@ func readOutcomes(ctx context.Context, tx pgx.Tx, id string, currentStage int, s
 
 func loadArtifactTarget(ctx context.Context, tx pgx.Tx, artifactID string) (rollout.ArtifactTarget, error) {
 	var target rollout.ArtifactTarget
-	err := tx.QueryRow(ctx, `SELECT platform, release_counter FROM artifacts WHERE id = $1`, artifactID).
-		Scan(&target.Platform, &target.Release)
+	var contentReadyAt *time.Time
+	err := tx.QueryRow(ctx, `SELECT platform, release_counter, content_ready_at FROM artifacts WHERE id = $1`, artifactID).
+		Scan(&target.Platform, &target.Release, &contentReadyAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return target, notFound("artifact", artifactID)
 	}
 	if err != nil {
 		return target, fmt.Errorf("query artifact: %w", err)
+	}
+	if contentReadyAt == nil {
+		return target, &ConflictError{Message: fmt.Sprintf("artifact %s has no verified content yet; upload it first", artifactID)}
 	}
 	return target, nil
 }

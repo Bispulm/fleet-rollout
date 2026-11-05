@@ -9,6 +9,7 @@ import (
 
 	"github.com/Bispulm/fleet-rollout/internal/apiv1"
 	"github.com/Bispulm/fleet-rollout/internal/rollout"
+	"github.com/Bispulm/fleet-rollout/internal/signing"
 	"github.com/Bispulm/fleet-rollout/internal/store"
 )
 
@@ -87,6 +88,14 @@ func (s *Server) writeError(w http.ResponseWriter, r *http.Request, err error) {
 		writeProblemDocument(w, apiv1.Problem{Status: http.StatusConflict, Detail: err.Error(), Code: apiv1.CodeReportConflict})
 	case errors.Is(err, store.ErrReportMismatch):
 		writeProblemDocument(w, apiv1.Problem{Status: http.StatusConflict, Detail: err.Error(), Code: apiv1.CodeReportMismatch})
+	case errors.Is(err, store.ErrNoOpenAssignment):
+		writeProblemDocument(w, apiv1.Problem{Status: http.StatusForbidden, Detail: err.Error(), Code: apiv1.CodeNoOpenAssignment})
+	case errors.Is(err, signing.ErrInvalidSignature):
+		writeProblemDocument(w, apiv1.Problem{Status: http.StatusUnprocessableEntity, Detail: err.Error(), Code: apiv1.CodeInvalidSignature})
+	case errors.Is(err, signing.ErrInvalidManifest):
+		writeProblemDocument(w, apiv1.Problem{Status: http.StatusUnprocessableEntity, Detail: err.Error(), Code: apiv1.CodeInvalidManifest})
+	case errors.Is(err, signing.ErrContentMismatch):
+		writeProblemDocument(w, apiv1.Problem{Status: http.StatusUnprocessableEntity, Detail: err.Error(), Code: apiv1.CodeContentMismatch})
 	case errors.Is(err, store.ErrMembershipNotFrozen):
 		writeProblemDocument(w, apiv1.Problem{Status: http.StatusConflict, Detail: err.Error(), Code: apiv1.CodeMembershipNotReady})
 	case errors.Is(err, store.ErrNotFound):

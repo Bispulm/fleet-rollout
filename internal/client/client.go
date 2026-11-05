@@ -16,17 +16,24 @@ import (
 	"time"
 
 	"github.com/Bispulm/fleet-rollout/internal/apiv1"
+	"github.com/Bispulm/fleet-rollout/internal/signing"
 )
 
 const (
 	defaultTimeout   = 60 * time.Second
 	maxErrorBodySize = 1 << 20
+	// maxResponseBytes bounds any response, and is far more than a page of results.
+	maxResponseBytes = 32 << 20
+	// maxDeviceResponseBytes bounds a poll or report response, which is small.
+	maxDeviceResponseBytes = 1 << 20
 )
 
 // APIError is an error response from the server, as opposed to a transport
 // failure. Callers can use it to tell permanent failures from retryable ones.
 type APIError struct {
 	Problem apiv1.Problem
+	// RetryAfter is how long the server asked the client to wait, if it did.
+	RetryAfter time.Duration
 }
 
 func (e *APIError) Error() string {
@@ -45,6 +52,36 @@ func (e *APIError) Error() string {
 	return b.String()
 }
 
+// IsRetryable reports whether trying again could help. Transport failures and server-side
+// failures could. Anything the server rejected on its merits, such as a bad credential or a
+// failed integrity check, can't. A canceled context means the caller has stopped caring.
+func IsRetryable(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return true
+	}
+	status := apiErr.Problem.Status
+	return status == http.StatusTooManyRequests || status >= http.StatusInternalServerError
+}
+
+// RetryAfter returns how long the server asked for a client to wait, or zero.
+func RetryAfter(err error) time.Duration {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.RetryAfter
+	}
+	return 0
+}
+
+// IsStatus reports whether err is an API error with this HTTP status.
+func IsStatus(err error, status int) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.Problem.Status == status
+}
+
 // IsCode reports whether err is an API error with the given problem code.
 func IsCode(err error, code string) bool {
 	var apiErr *APIError
@@ -58,21 +95,43 @@ type Client struct {
 	http    *http.Client
 }
 
-// New returns a Client. If httpClient is nil, a client with a request timeout is used.
+// New returns a Client. Ordinary calls get a request deadline here, rather than on the HTTP
+// client, because a large upload or download needs far longer than they do.
 func New(baseURL, token string, httpClient *http.Client) *Client {
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: defaultTimeout}
+		httpClient = &http.Client{}
 	}
 	return &Client{baseURL: strings.TrimRight(baseURL, "/"), token: token, http: httpClient}
 }
 
 // do sends a request and decodes a successful response into out, if out is set.
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, body, out any) error {
+	return c.doLimited(ctx, method, path, query, body, out, maxResponseBytes)
+}
+
+// doLimited is do, reading at most limit bytes of a successful response. A device trusts
+// nothing from the server, including how much it sends.
+func (c *Client) doLimited(ctx context.Context, method, path string, query url.Values, body, out any, limit int64) error {
+	raw, err := c.send(ctx, method, path, query, body, out != nil, limit)
+	if err != nil || out == nil {
+		return err
+	}
+	if err := json.Unmarshal(raw, out); err != nil {
+		return fmt.Errorf("decode response from %s %s: %w", method, path, err)
+	}
+	return nil
+}
+
+// send makes a request and returns up to limit bytes of a successful response's body, if
+// read is set.
+func (c *Client) send(ctx context.Context, method, path string, query url.Values, body any, read bool, limit int64) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
+	defer cancel()
 	var reader io.Reader = http.NoBody
 	if body != nil {
 		encoded, err := json.Marshal(body)
 		if err != nil {
-			return fmt.Errorf("encode request: %w", err)
+			return nil, fmt.Errorf("encode request: %w", err)
 		}
 		reader = bytes.NewReader(encoded)
 	}
@@ -82,7 +141,7 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	}
 	req, err := http.NewRequestWithContext(ctx, method, target, reader)
 	if err != nil {
-		return fmt.Errorf("build request: %w", err)
+		return nil, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	if body != nil {
@@ -91,20 +150,24 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("%s %s: %w", method, path, err)
+		return nil, fmt.Errorf("%s %s: %w", method, path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= http.StatusBadRequest {
-		return decodeError(resp)
+		return nil, decodeError(resp)
 	}
-	if out == nil {
-		return nil
+	if !read {
+		return nil, nil
 	}
-	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-		return fmt.Errorf("decode response from %s %s: %w", method, path, err)
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("read response from %s %s: %w", method, path, err)
 	}
-	return nil
+	if int64(len(raw)) > limit {
+		return nil, fmt.Errorf("response from %s %s is larger than %d bytes", method, path, limit)
+	}
+	return raw, nil
 }
 
 func decodeError(resp *http.Response) error {
@@ -116,7 +179,11 @@ func decodeError(resp *http.Response) error {
 			problem = decoded
 		}
 	}
-	return &APIError{Problem: problem}
+	out := &APIError{Problem: problem}
+	if seconds, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && seconds > 0 {
+		out.RetryAfter = time.Duration(seconds) * time.Second
+	}
+	return out
 }
 
 func segment(s string) string { return url.PathEscape(s) }
@@ -165,11 +232,33 @@ func (c *Client) UpdateDevice(ctx context.Context, id string, req apiv1.UpdateDe
 	return out, err
 }
 
-// CreateArtifact registers artifact metadata.
-func (c *Client) CreateArtifact(ctx context.Context, req apiv1.CreateArtifactRequest) (apiv1.Artifact, error) {
+// CreateArtifact registers a signed manifest. Repeating it for the same content returns the
+// existing artifact.
+func (c *Client) CreateArtifact(ctx context.Context, envelope signing.Envelope) (apiv1.Artifact, error) {
 	var out apiv1.Artifact
-	err := c.do(ctx, http.MethodPost, "/v1/artifacts", nil, req, &out)
+	err := c.do(ctx, http.MethodPost, "/v1/artifacts", nil, apiv1.CreateArtifactRequest{Envelope: envelope}, &out)
 	return out, err
+}
+
+// UploadArtifactContent sends an artifact's bytes. There's no deadline here beyond ctx, because
+// how long this takes depends on the artifact's size.
+func (c *Client) UploadArtifactContent(ctx context.Context, id string, content io.Reader, size int64) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.baseURL+"/v1/artifacts/"+segment(id)+"/content", content)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.ContentLength = size
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", "application/octet-stream")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("upload artifact: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode >= http.StatusBadRequest {
+		return decodeError(resp)
+	}
+	return nil
 }
 
 // GetArtifact returns an artifact by ID.
@@ -248,13 +337,62 @@ func NewDevice(baseURL, token string, httpClient *http.Client) *DeviceClient {
 // Poll asks for the device's current assignment, and records that it was heard from.
 func (c *DeviceClient) Poll(ctx context.Context) (apiv1.PollResponse, error) {
 	var out apiv1.PollResponse
-	err := c.client.do(ctx, http.MethodPost, "/v1/device/poll", nil, nil, &out)
+	err := c.client.doLimited(ctx, http.MethodPost, "/v1/device/poll", nil, nil, &out, maxDeviceResponseBytes)
 	return out, err
 }
 
 // Report sends a status update. A retry must repeat the same request exactly.
 func (c *DeviceClient) Report(ctx context.Context, req apiv1.ReportRequest) (apiv1.ReportResponse, error) {
 	var out apiv1.ReportResponse
-	err := c.client.do(ctx, http.MethodPost, "/v1/device/reports", nil, req, &out)
+	err := c.client.doLimited(ctx, http.MethodPost, "/v1/device/reports", nil, req, &out, maxDeviceResponseBytes)
 	return out, err
+}
+
+// Manifest fetches the signed manifest for an artifact the device is assigned.
+func (c *DeviceClient) Manifest(ctx context.Context, artifactID string) (signing.Envelope, error) {
+	path := "/v1/device/artifacts/" + segment(artifactID) + "/manifest"
+	raw, err := c.client.send(ctx, http.MethodGet, path, nil, nil, true, signing.MaxEnvelopeBytes)
+	if err != nil {
+		return signing.Envelope{}, err
+	}
+	envelope, err := signing.ParseEnvelope(raw)
+	if err != nil {
+		return signing.Envelope{}, fmt.Errorf("decode response from GET %s: %w", path, err)
+	}
+	return envelope, nil
+}
+
+// RangeResponse is what came back for a Range request, unchecked. The body is the caller's
+// to close. Deciding whether to believe any of it is up to the caller, which holds the
+// signed manifest.
+type RangeResponse struct {
+	StatusCode   int
+	ContentRange string
+	ETag         string
+	Body         io.ReadCloser
+}
+
+// FetchRange requests length bytes of an artifact, starting at offset.
+func (c *DeviceClient) FetchRange(ctx context.Context, artifactID string, offset, length int64) (RangeResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		c.client.baseURL+"/v1/device/artifacts/"+segment(artifactID)+"/content", http.NoBody)
+	if err != nil {
+		return RangeResponse{}, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.client.token)
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", offset, offset+length-1))
+	resp, err := c.client.http.Do(req)
+	if err != nil {
+		return RangeResponse{}, fmt.Errorf("fetch artifact range: %w", err)
+	}
+	if resp.StatusCode >= http.StatusBadRequest {
+		defer func() { _ = resp.Body.Close() }()
+		return RangeResponse{}, decodeError(resp)
+	}
+	return RangeResponse{
+		StatusCode:   resp.StatusCode,
+		ContentRange: resp.Header.Get("Content-Range"),
+		ETag:         resp.Header.Get("ETag"),
+		Body:         resp.Body,
+	}, nil
 }

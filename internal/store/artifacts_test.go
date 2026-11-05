@@ -1,6 +1,7 @@
 package store_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -17,14 +18,20 @@ func newArtifact(version string, release int64) store.NewArtifact {
 		ReleaseCounter: release,
 		SizeBytes:      1024,
 		SHA256:         sha256.Sum256([]byte(version)),
+		ChunkSize:      1024,
+		// The store keeps this as given. Verifying signatures happens above it.
+		Envelope: []byte(`{"envelope":"` + version + `"}`),
 	}
 }
 
 func mustRegisterArtifact(t *testing.T, ctx context.Context, s *store.Store, a store.NewArtifact) store.Artifact {
 	t.Helper()
-	artifact, err := s.RegisterArtifact(ctx, a)
+	artifact, _, err := s.RegisterArtifact(ctx, a)
 	if err != nil {
 		t.Fatalf("RegisterArtifact: %v", err)
+	}
+	if err := s.MarkArtifactContentReady(ctx, artifact.ID); err != nil {
+		t.Fatalf("MarkArtifactContentReady: %v", err)
 	}
 	return artifact
 }
@@ -41,8 +48,43 @@ func TestRegisterAndGetArtifact(t *testing.T) {
 		t.Fatalf("GetArtifact: %v", err)
 	}
 	if got.Name != input.Name || got.Version != input.Version || got.Platform != input.Platform ||
-		got.ReleaseCounter != 14 || got.SizeBytes != 1024 || got.SHA256 != input.SHA256 {
+		got.ReleaseCounter != 14 || got.SizeBytes != 1024 || got.SHA256 != input.SHA256 || got.ChunkSize != 1024 {
 		t.Fatalf("got = %+v, want values from %+v", got, input)
+	}
+	if !bytes.Equal(got.Envelope, input.Envelope) {
+		t.Fatalf("envelope = %s, want it stored exactly", got.Envelope)
+	}
+	if got.ContentReadyAt == nil {
+		t.Fatal("content wasn't recorded as ready")
+	}
+}
+
+func TestRegisteringTheSameContentAgainReturnsTheArtifact(t *testing.T) {
+	s, ctx := newStore(t)
+	first, created, err := s.RegisterArtifact(ctx, newArtifact("1.4.0", 14))
+	if err != nil || !created {
+		t.Fatalf("first: created = %v, err = %v", created, err)
+	}
+	if first.ContentReadyAt != nil {
+		t.Fatal("content is ready before any was uploaded")
+	}
+	again, created, err := s.RegisterArtifact(ctx, newArtifact("1.4.0", 14))
+	if err != nil || created {
+		t.Fatalf("retry: created = %v, err = %v", created, err)
+	}
+	if again.ID != first.ID {
+		t.Fatalf("retry returned %s, want %s", again.ID, first.ID)
+	}
+}
+
+func TestMarkingContentReadyIsIdempotent(t *testing.T) {
+	s, ctx := newStore(t)
+	artifact := mustRegisterArtifact(t, ctx, s, newArtifact("1.4.0", 14))
+	if err := s.MarkArtifactContentReady(ctx, artifact.ID); err != nil {
+		t.Fatalf("second MarkArtifactContentReady: %v", err)
+	}
+	if err := s.MarkArtifactContentReady(ctx, "not-a-uuid"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("malformed ID: error = %v", err)
 	}
 }
 
@@ -54,7 +96,7 @@ func TestRegisterArtifactRejectsReusedVersionOrRelease(t *testing.T) {
 		"same release counter": newArtifact("1.5.0", 14),
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := s.RegisterArtifact(ctx, dup)
+			_, _, err := s.RegisterArtifact(ctx, dup)
 			var conflict *store.ConflictError
 			if !errors.As(err, &conflict) {
 				t.Fatalf("error = %v, want *ConflictError", err)

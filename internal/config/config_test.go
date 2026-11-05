@@ -9,8 +9,10 @@ import (
 
 func env(overrides map[string]string) func(string) string {
 	base := map[string]string{
-		"ROLLOUTD_DATABASE_URL": "postgres://u:hunter2@127.0.0.1:15431/rollout",
-		"ROLLOUTD_ADMIN_TOKEN":  strings.Repeat("x", minAdminTokenLength),
+		"ROLLOUTD_DATABASE_URL":    "postgres://u:hunter2@127.0.0.1:15431/rollout",
+		"ROLLOUTD_ADMIN_TOKEN":     strings.Repeat("x", minAdminTokenLength),
+		"ROLLOUTD_TRUST_KEYS_FILE": "/etc/rollout/trust.pem",
+		"ROLLOUTD_ARTIFACT_DIR":    "/var/lib/rollout/artifacts",
 	}
 	for k, v := range overrides {
 		base[k] = v
@@ -38,7 +40,7 @@ func TestLoadAppliesLoopbackAndDefaults(t *testing.T) {
 }
 
 func TestLoadRejectsMissingSecrets(t *testing.T) {
-	for _, name := range []string{"ROLLOUTD_DATABASE_URL", "ROLLOUTD_ADMIN_TOKEN"} {
+	for _, name := range []string{"ROLLOUTD_DATABASE_URL", "ROLLOUTD_ADMIN_TOKEN", "ROLLOUTD_TRUST_KEYS_FILE", "ROLLOUTD_ARTIFACT_DIR"} {
 		t.Run(name, func(t *testing.T) {
 			_, err := Load(env(map[string]string{name: ""}))
 			if err == nil || !strings.Contains(err.Error(), name) {
@@ -137,8 +139,8 @@ func TestLoadEngineAndDeviceTimingDefaults(t *testing.T) {
 	if cfg.EngineInterval != 5*time.Second || cfg.EngineLeaseTTL != 30*time.Second {
 		t.Errorf("engine timing = %v, %v", cfg.EngineInterval, cfg.EngineLeaseTTL)
 	}
-	if cfg.PollInterval != time.Minute || cfg.AssignmentLease != 5*time.Minute {
-		t.Errorf("device timing = %v, %v", cfg.PollInterval, cfg.AssignmentLease)
+	if cfg.PollInterval != time.Minute {
+		t.Errorf("poll interval = %v", cfg.PollInterval)
 	}
 }
 
@@ -163,7 +165,6 @@ func TestLoadRejectsUnsafeTiming(t *testing.T) {
 		{"unparseable TTL", map[string]string{"ROLLOUTD_ENGINE_LEASE_TTL": "soon"}, "ROLLOUTD_ENGINE_LEASE_TTL"},
 		{"TTL shorter than three intervals", map[string]string{"ROLLOUTD_ENGINE_INTERVAL": "10s", "ROLLOUTD_ENGINE_LEASE_TTL": "29s"}, "ROLLOUTD_ENGINE_LEASE_TTL"},
 		{"poll interval under a second", map[string]string{"ROLLOUTD_POLL_INTERVAL": "500ms"}, "ROLLOUTD_POLL_INTERVAL"},
-		{"lease shorter than two polls", map[string]string{"ROLLOUTD_POLL_INTERVAL": "60s", "ROLLOUTD_ASSIGNMENT_LEASE": "119s"}, "ROLLOUTD_ASSIGNMENT_LEASE"},
 		{"bad boolean", map[string]string{"ROLLOUTD_ENGINE_ENABLED": "maybe"}, "ROLLOUTD_ENGINE_ENABLED"},
 	}
 	for _, tc := range cases {
@@ -181,9 +182,48 @@ func TestLoadAcceptsTimingAtTheBoundaries(t *testing.T) {
 		"ROLLOUTD_ENGINE_INTERVAL":  "10s",
 		"ROLLOUTD_ENGINE_LEASE_TTL": "30s",
 		"ROLLOUTD_POLL_INTERVAL":    "1s",
-		"ROLLOUTD_ASSIGNMENT_LEASE": "2s",
 	}))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
+	}
+}
+
+func TestLoadArtifactLimit(t *testing.T) {
+	cfg, err := Load(env(nil))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MaxArtifactBytes != 1<<30 {
+		t.Fatalf("default limit = %d", cfg.MaxArtifactBytes)
+	}
+	cfg, err = Load(env(map[string]string{"ROLLOUTD_MAX_ARTIFACT_BYTES": "2048"}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MaxArtifactBytes != 2048 || cfg.TrustKeysFile != "/etc/rollout/trust.pem" || cfg.ArtifactDir != "/var/lib/rollout/artifacts" {
+		t.Fatalf("config = %+v", cfg)
+	}
+	for _, bad := range []string{"0", "-1", "lots"} {
+		if _, err := Load(env(map[string]string{"ROLLOUTD_MAX_ARTIFACT_BYTES": bad})); err == nil {
+			t.Errorf("accepted a limit of %q", bad)
+		}
+	}
+}
+
+func TestLoadDeviceLimits(t *testing.T) {
+	cfg, err := Load(env(nil))
+	if err != nil || cfg.MaxDeviceRequests != 256 || cfg.MaxDeviceDownloads != 128 {
+		t.Fatalf("defaults = %d, %d, err = %v", cfg.MaxDeviceRequests, cfg.MaxDeviceDownloads, err)
+	}
+	cfg, err = Load(env(map[string]string{"ROLLOUTD_MAX_DEVICE_REQUESTS": "32", "ROLLOUTD_MAX_DEVICE_DOWNLOADS": "8"}))
+	if err != nil || cfg.MaxDeviceRequests != 32 || cfg.MaxDeviceDownloads != 8 {
+		t.Fatalf("configured = %d, %d, err = %v", cfg.MaxDeviceRequests, cfg.MaxDeviceDownloads, err)
+	}
+	for _, name := range []string{"ROLLOUTD_MAX_DEVICE_REQUESTS", "ROLLOUTD_MAX_DEVICE_DOWNLOADS"} {
+		for _, bad := range []string{"0", "-5", "many"} {
+			if _, err := Load(env(map[string]string{name: bad})); err == nil {
+				t.Errorf("%s: accepted %q", name, bad)
+			}
+		}
 	}
 }

@@ -12,18 +12,19 @@ import (
 )
 
 const (
-	defaultListenAddr      = "127.0.0.1:18100"
-	defaultShutdownTimeout = 15 * time.Second
-	defaultDBMaxConns      = 16
-	minAdminTokenLength    = 16
-	defaultEngineInterval  = 5 * time.Second
-	defaultEngineLeaseTTL  = 30 * time.Second
-	defaultPollInterval    = time.Minute
-	defaultAssignmentLease = 5 * time.Minute
+	defaultListenAddr        = "127.0.0.1:18100"
+	defaultShutdownTimeout   = 15 * time.Second
+	defaultDBMaxConns        = 16
+	minAdminTokenLength      = 16
+	defaultEngineInterval    = 5 * time.Second
+	defaultEngineLeaseTTL    = 30 * time.Second
+	defaultPollInterval      = time.Minute
+	defaultMaxArtifactBytes  = 1 << 30
+	defaultMaxDeviceRequests = 256
+	// Downloads hold their slot while a chunk streams, so they get a pool of their own.
+	defaultMaxDeviceDownloads = 128
 	// A slow tick or two shouldn't cost the engine its lease.
 	minLeaseTTLIntervals = 3
-	// A device that misses one poll shouldn't lose its assignment's lease.
-	minLeasePollIntervals = 2
 )
 
 // Config holds the settings for the rolloutd server.
@@ -35,11 +36,17 @@ type Config struct {
 	ShutdownTimeout time.Duration
 	DBMaxConns      int32
 
-	EngineEnabled   bool
-	EngineInterval  time.Duration
-	EngineLeaseTTL  time.Duration
-	PollInterval    time.Duration
-	AssignmentLease time.Duration
+	// TrustKeysFile lists the public keys allowed to sign artifacts.
+	TrustKeysFile      string
+	ArtifactDir        string
+	MaxArtifactBytes   int64
+	MaxDeviceRequests  int
+	MaxDeviceDownloads int
+
+	EngineEnabled  bool
+	EngineInterval time.Duration
+	EngineLeaseTTL time.Duration
+	PollInterval   time.Duration
 }
 
 // Load reads settings through getenv, which is normally os.Getenv. It reports
@@ -54,7 +61,6 @@ func Load(getenv func(string) string) (Config, error) {
 		EngineInterval:  defaultEngineInterval,
 		EngineLeaseTTL:  defaultEngineLeaseTTL,
 		PollInterval:    defaultPollInterval,
-		AssignmentLease: defaultAssignmentLease,
 	}
 	var problems []error
 
@@ -106,6 +112,43 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 	}
 
+	cfg.TrustKeysFile = getenv("ROLLOUTD_TRUST_KEYS_FILE")
+	if cfg.TrustKeysFile == "" {
+		problems = append(problems, errors.New("ROLLOUTD_TRUST_KEYS_FILE is required"))
+	}
+	cfg.ArtifactDir = getenv("ROLLOUTD_ARTIFACT_DIR")
+	if cfg.ArtifactDir == "" {
+		problems = append(problems, errors.New("ROLLOUTD_ARTIFACT_DIR is required"))
+	}
+	cfg.MaxArtifactBytes = defaultMaxArtifactBytes
+	if v := getenv("ROLLOUTD_MAX_ARTIFACT_BYTES"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n < 1 {
+			problems = append(problems, fmt.Errorf("ROLLOUTD_MAX_ARTIFACT_BYTES: %q is not a positive integer", v))
+		} else {
+			cfg.MaxArtifactBytes = n
+		}
+	}
+
+	for _, limit := range []struct {
+		name string
+		dst  *int
+		def  int
+	}{
+		{"ROLLOUTD_MAX_DEVICE_REQUESTS", &cfg.MaxDeviceRequests, defaultMaxDeviceRequests},
+		{"ROLLOUTD_MAX_DEVICE_DOWNLOADS", &cfg.MaxDeviceDownloads, defaultMaxDeviceDownloads},
+	} {
+		*limit.dst = limit.def
+		if v := getenv(limit.name); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 1 {
+				problems = append(problems, fmt.Errorf("%s: %q is not a positive integer", limit.name, v))
+			} else {
+				*limit.dst = n
+			}
+		}
+	}
+
 	problems = append(problems, cfg.loadTiming(getenv)...)
 
 	if err := errors.Join(problems...); err != nil {
@@ -131,7 +174,6 @@ func (cfg *Config) loadTiming(getenv func(string) string) []error {
 		{"ROLLOUTD_ENGINE_INTERVAL", &cfg.EngineInterval},
 		{"ROLLOUTD_ENGINE_LEASE_TTL", &cfg.EngineLeaseTTL},
 		{"ROLLOUTD_POLL_INTERVAL", &cfg.PollInterval},
-		{"ROLLOUTD_ASSIGNMENT_LEASE", &cfg.AssignmentLease},
 	}
 	for _, d := range durations {
 		v := getenv(d.name)
@@ -150,9 +192,6 @@ func (cfg *Config) loadTiming(getenv func(string) string) []error {
 	}
 	if cfg.PollInterval < time.Second {
 		problems = append(problems, errors.New("ROLLOUTD_POLL_INTERVAL must be at least 1s"))
-	}
-	if cfg.AssignmentLease < minLeasePollIntervals*cfg.PollInterval {
-		problems = append(problems, fmt.Errorf("ROLLOUTD_ASSIGNMENT_LEASE must be at least %d times ROLLOUTD_POLL_INTERVAL", minLeasePollIntervals))
 	}
 	return problems
 }

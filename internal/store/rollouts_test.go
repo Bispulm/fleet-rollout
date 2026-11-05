@@ -347,3 +347,27 @@ func TestDifferentDefinitionRacingACreateStillConflicts(t *testing.T) {
 		t.Fatalf("errors = %v, want exactly one conflict", errs)
 	}
 }
+
+func TestRolloutsRequireAnArtifactWithItsContent(t *testing.T) {
+	s, ctx := newStore(t)
+	w := newWorld(t, ctx, s, 10)
+	unready, _, err := s.RegisterArtifact(ctx, newArtifact("2.0.0", 20))
+	if err != nil {
+		t.Fatalf("RegisterArtifact: %v", err)
+	}
+	input := w.newRollout(t, "demo")
+	input.ArtifactID = unready.ID
+
+	_, _, err = s.CreateRollout(ctx, "lab-a", input)
+	var conflict *store.ConflictError
+	if !errors.As(err, &conflict) || !strings.Contains(conflict.Error(), "content") {
+		t.Fatalf("error = %v, want a conflict about the missing content", err)
+	}
+
+	if err := s.MarkArtifactContentReady(ctx, unready.ID); err != nil {
+		t.Fatalf("MarkArtifactContentReady: %v", err)
+	}
+	if _, _, err := s.CreateRollout(ctx, "lab-a", input); err != nil {
+		t.Fatalf("CreateRollout once the content arrived: %v", err)
+	}
+}

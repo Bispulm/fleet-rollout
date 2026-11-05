@@ -148,7 +148,8 @@ pause, so a pause can't make a stage time out by itself. Safety checks keep runn
 so a breach moves the rollout from `paused` to `halted`.
 
 Pausing prevents new forward assignments atomically, and tells devices that haven't started installing to
-hold. Devices already installing finish.
+hold. Devices already installing finish. A device that asks to start installing during a pause is refused,
+and that request is ordered against the pause, so once a pause has committed no new install starts.
 
 ### Late reports
 
@@ -196,7 +197,7 @@ and any revision the caller supplied, bumps the revision, and appends an audit r
 
 ## Assignments and reports
 
-**Status: Implemented,** except that the agent's side of the lease arrives with the agent.
+**Status: Implemented.**
 
 ### Issuing
 
@@ -215,24 +216,29 @@ A device that polls twice at once gets the same assignment both times.
 
 A decommissioned device can't authenticate at all.
 
-### Directives and the validity lease
+### Directives
 
-Each poll returns the device's open assignment with a directive and a validity lease, `expires_at`.
+Each poll returns the device's open assignment with a directive.
 
 | Rollout state | Assignment not yet installing | Assignment in flight |
 |---|---|---|
-| `running`, `soaking` | `proceed`, lease renewed | `proceed`, lease renewed |
-| `paused` | `hold`, lease not renewed | `proceed`, lease renewed |
+| `running`, `soaking` | `proceed` | `proceed` |
+| `paused` | `hold` | `proceed` |
 | `halted`, `aborted`, `completed`, or rolling back | Superseded, so no assignment is returned | `proceed`, to finish and report |
 
-An agent must not begin installing once its lease has expired, and must poll for a fresh one first. An
-agent holding an assignment that a poll no longer returns must abandon it, unless it's already in flight.
+A directive is advice about the next step, and can be out of date by the time the device acts on it. An agent
+starts installing only once the server has accepted its report of `installing`, as described under Reports and in
+[ADR 0009](adr/0009-installs-need-the-servers-agreement.md), so a stale `proceed` can't start an install the
+server would refuse. An agent holding an assignment that a poll no longer returns must abandon it, unless it's
+already in flight.
 
 ### Reports
 
 - A report names its rollout, assignment, generation, and a sequence number the agent persists. The
   assignment must belong to the authenticated device. Anything else is treated as not found.
-- An identical repeat of a report is acknowledged and changes nothing.
+- An identical repeat of a report is acknowledged as a duplicate and changes nothing. The response says
+  what became of the original, so a device that lost the first response learns the same thing from the
+  retry.
 - A different report with an already-used sequence is rejected as a conflict.
 - Every new report is recorded in the append-only event log, whether or not it's applied, with the reason
   it was ignored if it wasn't.
@@ -241,6 +247,12 @@ agent holding an assignment that a poll no longer returns must abandon it, unles
   decision, and can't count twice, since outcomes come from one row per device.
 - Progress only moves forward, and may skip steps. `succeeded` requires having reached `health_check`, so
   a device can't claim success without having checked. `failed` is allowed from any open state.
+- A report that moves an assignment into an in-flight state from one that isn't is a request to start
+  installing, and it's decided against the rollout as it stands. It's refused as `on_hold` while the
+  assignment is held, and the assignment stays open. Once a halt, abort, or completion has superseded the
+  assignment, it's ignored as finished. Those transitions update the assignment, so its row lock orders
+  them against the report. A pause doesn't, so this one report also takes a shared lock on the rollout
+  first. Reports from devices already in flight never wait on it.
 - Stage counts are derived from assignments at evaluation time. There are no counters that could drift
   from them, and nothing in memory to lose on restart.
 
@@ -251,8 +263,8 @@ A device can't be recalled until its next poll. When a rollout halts or aborts:
 1. No new forward assignment can be issued, from that transaction onward.
 2. Open assignments that haven't started installing are superseded in the same transaction. A report
    from one afterward is recorded and ignored.
-3. A device that has lost contact stops before installing when its lease expires, so the time during
-   which a halted rollout can still gain new installs is bounded by the lease length.
+3. A device can't start installing until the server accepts its request, and from that transaction onward
+   the server refuses. So a halted rollout gains no new installs, however long a device was out of contact.
 4. Installs already in flight run to completion and report. That exposure is unavoidable, and status
    shows the count for each stage.
 
@@ -262,6 +274,94 @@ A rollout completes at its required coverage, so some members may have no outcom
 the release afterward, and any assignment that hasn't reached installation is superseded, so it can't
 stand in the way of later work. A follow-up rollout of the same artifact covers these devices, since
 members already on that release are excluded from it as `already_current`.
+
+## Artifacts and devices
+
+**Status: Implemented.** The agent, `rollout-agent`, installs by copying an artifact's bytes into a slot, and
+nothing runs them.
+
+### What a device checks
+
+Before installing, a device verifies all of these, and any failure is permanent: it reports `failed` with a reason and
+installs nothing.
+
+1. The manifest's signature, from a key on the device's own trust list.
+2. That the manifest matches what the assignment describes, and the device's platform.
+3. The size, against the manifest and against the device's own limit.
+4. Every chunk's digest as it arrives, and the full digest at the end.
+5. Downgrade protection: the release counter must be above what's running. If it's equal and the digest matches,
+   the device already has this release, and reports success without reinstalling. Anything else is rejected.
+
+### Starting to install
+
+Once everything checks out, the device asks the server's permission by reporting `installing`, after any earlier
+reports have been delivered. It saves the request first, so a retry is identical.
+
+| Answer | What the device does |
+|---|---|
+| Applied, or a duplicate of one that was applied | Install |
+| Ignored as `on_hold` | Keep the verified download, hold until a poll says proceed, then ask again with a new report |
+| Ignored as finished, or a permanent error | Abandon the assignment and install nothing |
+| No answer | Wait and send the same request again, for as long as it takes |
+
+### Downloads
+
+A partial download only ever contains verified chunks, because a chunk is checked before it's kept. A response has to
+be `206`, with a `Content-Range` starting at the requested offset, a total matching the manifest, and an `ETag` naming
+the expected digest.
+
+| What goes wrong | What the device does |
+|---|---|
+| Connection drops, or a server error | Retry from the last verified chunk, with backoff and jitter |
+| Server ignores the Range request and sends `200` | Start over from byte 0 with that response, checking each chunk as it arrives |
+| A different `ETag`, offset, or total | Discard the response and count an integrity strike |
+| A chunk fails its digest | Discard the chunk and count an integrity strike |
+| Too many integrity strikes | Report `failed`, and install nothing |
+| No longer assigned, or a `403` | Abandon the download and delete the partial data |
+
+The server only serves an artifact to a device with an open assignment for it, so superseding an assignment also cuts
+off the download.
+
+### Retries
+
+Network failures, `429`, and `5xx` are retried with exponential backoff, waiting a random time between half the current
+limit and all of it, and respecting `Retry-After`.
+Authentication, integrity, and policy failures aren't retried as if they were transient. A `401` means the device can't
+do anything useful, so it slows to its longest backoff and keeps its state.
+
+The server serves a bounded number of device requests at once, `ROLLOUTD_MAX_DEVICE_REQUESTS` for polls, reports, and
+manifests, and `ROLLOUTD_MAX_DEVICE_DOWNLOADS` for downloads, which hold their slot while a chunk streams. Past that it
+answers `503` with a `Retry-After` of a few seconds, before touching the database, rather than queueing. Downloads have
+their own pool so that slow ones can't crowd out the reports of devices already installing. So when a whole fleet
+reconnects at once, the excess is turned away cheaply, and the devices come back spread out by the server's
+`Retry-After` and their own jitter.
+
+### Crashes
+
+Everything needed to recover is saved atomically before it's acted on: the assignment, verified download progress, the
+active and pending slots, the previous healthy artifact, the report sequence, and reports not yet acknowledged.
+
+| Crash during | On restart |
+|---|---|
+| Downloading | Discard anything past the last verified chunk, and continue |
+| Verifying | Verify again from the start |
+| Installing or health check | The new slot can't be trusted. Keep the previous one, and report `reverting` then `failed` |
+| Reverting | Finish reverting |
+| After recording success | The new slot is active. Send any reports still outstanding |
+| Between sending a report and recording that it was acknowledged | Send it again. The server treats it as a duplicate |
+| Between asking to install and recording the answer | Ask again with the same request. The server answers a duplicate with what became of the first, so the device installs only if it was accepted |
+
+### Simulator faults
+
+The simulator runs the real agent and injects faults only at its boundaries: dropped requests, responses lost after
+the server acted, corrupted and truncated downloads, duplicate reports, crashes at any save or during an install,
+devices offline for a while, everyone reconnecting at once, latency in live runs, and releases that fail their health
+check on a share of devices. See [ADR 0008](adr/0008-step-driven-agent-and-simulator.md) for what a seed does and
+doesn't reproduce.
+
+A crash during an install or health check counts against the release, because a release that reboots the device looks
+exactly the same. A fleet that loses power often therefore needs a failure limit above that background rate, and early
+stages big enough that one interrupted install doesn't decide them. The simulator's presets are sized that way.
 
 ## Rollback
 

@@ -220,6 +220,10 @@ func TestSoakMustElapseBeforePromotion(t *testing.T) {
 	if v := policy.Evaluate(soaking(o, 10*time.Minute)); v.Action != ActionPromote {
 		t.Fatalf("verdict at exactly the soak time = %+v, want promotion", v)
 	}
+	// Whole seconds are enough, and never round up to look finished early.
+	if v := policy.Evaluate(soaking(o, 10*time.Minute-time.Millisecond)); v.Waiting != "soak: 9m59s of 10m0s" {
+		t.Fatalf("waiting = %q", v.Waiting)
+	}
 }
 
 func TestZeroSoakPromotesAtTheFirstEvaluationThatPasses(t *testing.T) {

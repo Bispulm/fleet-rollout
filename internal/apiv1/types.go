@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Bispulm/fleet-rollout/internal/rollout"
+	"github.com/Bispulm/fleet-rollout/internal/signing"
 )
 
 // CreateFleetRequest is the body of POST /v1/fleets.
@@ -83,17 +84,14 @@ const (
 	CodeUnauthorized       = "unauthorized"
 )
 
-// CreateArtifactRequest is the body of POST /v1/artifacts. SHA256 is lowercase hex.
+// CreateArtifactRequest is the body of POST /v1/artifacts: a signed manifest. The artifact's
+// bytes follow in a PUT to its content URL.
 type CreateArtifactRequest struct {
-	Name           string `json:"name"`
-	Version        string `json:"version"`
-	Platform       string `json:"platform"`
-	ReleaseCounter int64  `json:"release_counter"`
-	SizeBytes      int64  `json:"size_bytes"`
-	SHA256         string `json:"sha256"`
+	Envelope signing.Envelope `json:"envelope"`
 }
 
-// Artifact is immutable metadata for a release.
+// Artifact is immutable metadata for a release. A rollout needs ContentReady, which means
+// the bytes are stored and match the signed manifest.
 type Artifact struct {
 	ID             string    `json:"id"`
 	Name           string    `json:"name"`
@@ -102,6 +100,8 @@ type Artifact struct {
 	ReleaseCounter int64     `json:"release_counter"`
 	SizeBytes      int64     `json:"size_bytes"`
 	SHA256         string    `json:"sha256"`
+	ChunkSize      int64     `json:"chunk_size"`
+	ContentReady   bool      `json:"content_ready"`
 	CreatedAt      time.Time `json:"created_at"`
 }
 
@@ -204,8 +204,9 @@ type TransitionLog struct {
 	Transitions []Transition `json:"transitions"`
 }
 
-// DeviceAssignment is what a device is told to do. A device must not begin installing
-// after ExpiresAt without polling again.
+// DeviceAssignment is what a device is told to do. The directive is advice. Whether the
+// device may start installing is decided when it reports installing, which it must do
+// and have applied before it starts.
 type DeviceAssignment struct {
 	ID         string                  `json:"id"`
 	RolloutID  string                  `json:"rollout_id"`
@@ -213,7 +214,7 @@ type DeviceAssignment struct {
 	Stage      int                     `json:"stage"`
 	State      rollout.AssignmentState `json:"state"`
 	Directive  rollout.Directive       `json:"directive"`
-	ExpiresAt  time.Time               `json:"expires_at"`
+	Kind       string                  `json:"kind"`
 	Artifact   Artifact                `json:"artifact"`
 }
 
@@ -237,7 +238,10 @@ type ReportRequest struct {
 }
 
 // ReportResponse says what became of a report. All of these are final, and none of
-// them should be retried.
+// them should be retried. Duplicate means the server already had this exact report, and
+// Applied and IgnoredReason then describe what became of the first copy. IgnoredReason is
+// one of the rollout.Ignored values. A report of installing that's ignored as on_hold
+// means the device must not start installing yet.
 type ReportResponse struct {
 	Applied       bool   `json:"applied"`
 	Duplicate     bool   `json:"duplicate,omitempty"`
@@ -249,3 +253,14 @@ const (
 	CodeReportConflict = "report_conflict"
 	CodeReportMismatch = "report_mismatch"
 )
+
+// The problem codes for artifacts. None of these can be fixed by retrying.
+const (
+	CodeInvalidSignature = "invalid_signature"
+	CodeInvalidManifest  = "invalid_manifest"
+	CodeContentMismatch  = "content_mismatch"
+	CodeNoOpenAssignment = "no_open_assignment"
+)
+
+// CodeOverloaded means the server is shedding load. Retry after the time in Retry-After.
+const CodeOverloaded = "overloaded"

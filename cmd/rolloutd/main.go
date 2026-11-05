@@ -18,9 +18,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Bispulm/fleet-rollout/internal/api"
+	"github.com/Bispulm/fleet-rollout/internal/artifactstore"
 	"github.com/Bispulm/fleet-rollout/internal/config"
 	"github.com/Bispulm/fleet-rollout/internal/db"
 	"github.com/Bispulm/fleet-rollout/internal/engine"
+	"github.com/Bispulm/fleet-rollout/internal/signing"
 	"github.com/Bispulm/fleet-rollout/internal/store"
 )
 
@@ -90,14 +92,31 @@ func runMigrate(ctx context.Context, pool *pgxpool.Pool, stdout io.Writer) error
 }
 
 func runServe(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, e env) error {
+	trustKeys, err := os.ReadFile(cfg.TrustKeysFile)
+	if err != nil {
+		return fmt.Errorf("read trust list: %w", err)
+	}
+	trust, err := signing.ParseTrustSet(trustKeys)
+	if err != nil {
+		return fmt.Errorf("read trust list: %w", err)
+	}
+	artifacts, err := artifactstore.NewFilesystem(cfg.ArtifactDir)
+	if err != nil {
+		return err
+	}
+
 	st := store.New(pool)
 	server := api.New(api.Options{
-		Logger:          logger,
-		Ready:           func(ctx context.Context) error { return db.CheckReady(ctx, pool) },
-		Store:           st,
-		AdminToken:      cfg.AdminToken,
-		PollInterval:    cfg.PollInterval,
-		AssignmentLease: cfg.AssignmentLease,
+		Logger:             logger,
+		Ready:              func(ctx context.Context) error { return db.CheckReady(ctx, pool) },
+		Store:              st,
+		AdminToken:         cfg.AdminToken,
+		PollInterval:       cfg.PollInterval,
+		Trust:              trust,
+		Artifacts:          artifacts,
+		MaxArtifactBytes:   cfg.MaxArtifactBytes,
+		MaxDeviceRequests:  cfg.MaxDeviceRequests,
+		MaxDeviceDownloads: cfg.MaxDeviceDownloads,
 	})
 
 	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", cfg.ListenAddr)

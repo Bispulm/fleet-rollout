@@ -11,7 +11,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Bispulm/fleet-rollout/internal/artifactstore"
 	"github.com/Bispulm/fleet-rollout/internal/auth"
+	"github.com/Bispulm/fleet-rollout/internal/signing"
 	"github.com/Bispulm/fleet-rollout/internal/store"
 )
 
@@ -29,9 +31,19 @@ type Options struct {
 	AdminToken string
 	// PollInterval is how often devices are told to poll.
 	PollInterval time.Duration
-	// AssignmentLease is how long a device may keep working on an assignment without
-	// hearing from the server.
-	AssignmentLease time.Duration
+	// Trust is who may sign artifacts.
+	Trust signing.TrustSet
+	// Artifacts holds artifact bytes.
+	Artifacts artifactstore.Store
+	// MaxArtifactBytes is the largest artifact accepted.
+	MaxArtifactBytes int64
+	// MaxDeviceRequests bounds how many device polls, reports, and manifest fetches are
+	// served at once. More than that are turned away with a time to retry, rather than
+	// queued.
+	MaxDeviceRequests int
+	// MaxDeviceDownloads bounds artifact downloads in the same way, separately, so that slow
+	// downloads can't crowd out the reports of devices already installing.
+	MaxDeviceDownloads int
 }
 
 // Server is the HTTP API. It is safe for concurrent use.
@@ -44,8 +56,12 @@ type Server struct {
 	handler   http.Handler
 	draining  atomic.Bool
 
-	pollInterval    time.Duration
-	assignmentLease time.Duration
+	pollInterval     time.Duration
+	trust            signing.TrustSet
+	artifacts        artifactstore.Store
+	maxArtifactBytes int64
+	deviceSlots      chan struct{}
+	downloadSlots    chan struct{}
 }
 
 // New builds a Server with its routes registered.
@@ -56,14 +72,26 @@ func New(opts Options) *Server {
 		store:  opts.Store,
 		mux:    http.NewServeMux(),
 
-		pollInterval:    opts.PollInterval,
-		assignmentLease: opts.AssignmentLease,
+		pollInterval:     opts.PollInterval,
+		trust:            opts.Trust,
+		artifacts:        opts.Artifacts,
+		maxArtifactBytes: opts.MaxArtifactBytes,
 	}
+	if s.maxArtifactBytes == 0 {
+		s.maxArtifactBytes = defaultMaxArtifactBytes
+	}
+	slots := opts.MaxDeviceRequests
+	if slots == 0 {
+		slots = defaultMaxDeviceRequests
+	}
+	s.deviceSlots = make(chan struct{}, slots)
+	downloads := opts.MaxDeviceDownloads
+	if downloads == 0 {
+		downloads = defaultMaxDeviceDownloads
+	}
+	s.downloadSlots = make(chan struct{}, downloads)
 	if s.pollInterval == 0 {
 		s.pollInterval = defaultPollInterval
-	}
-	if s.assignmentLease == 0 {
-		s.assignmentLease = defaultAssignmentLease
 	}
 	s.handler = observe(s.logger, http.HandlerFunc(s.route))
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)

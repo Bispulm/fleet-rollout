@@ -3,11 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +19,8 @@ import (
 	"github.com/Bispulm/fleet-rollout/internal/apiv1"
 	"github.com/Bispulm/fleet-rollout/internal/client"
 	"github.com/Bispulm/fleet-rollout/internal/rollout"
+	"github.com/Bispulm/fleet-rollout/internal/signing"
+	"github.com/Bispulm/fleet-rollout/internal/signing/signingtest"
 	"github.com/Bispulm/fleet-rollout/internal/testdb"
 )
 
@@ -31,11 +36,26 @@ func (s *syncWriter) Write(p []byte) (int, error) {
 	return s.w.Write(p)
 }
 
-func testEnv(dbURL string) func(string) string {
+// writeTrustFile creates a signing key and a trust list holding it.
+func writeTrustFile(t *testing.T) (ed25519.PrivateKey, string) {
+	t.Helper()
+	key := signingtest.NewKey(t)
+	path := filepath.Join(t.TempDir(), "trust.pem")
+	if err := os.WriteFile(path, signingtest.PublicPEM(t, key), 0o600); err != nil {
+		t.Fatalf("write trust list: %v", err)
+	}
+	return key, path
+}
+
+func testEnv(t *testing.T, dbURL string) func(string) string {
+	t.Helper()
+	_, trustFile := writeTrustFile(t)
 	vals := map[string]string{
-		"ROLLOUTD_DATABASE_URL": dbURL,
-		"ROLLOUTD_ADMIN_TOKEN":  strings.Repeat("x", 32),
-		"ROLLOUTD_LISTEN_ADDR":  "127.0.0.1:0",
+		"ROLLOUTD_DATABASE_URL":    dbURL,
+		"ROLLOUTD_ADMIN_TOKEN":     strings.Repeat("x", 32),
+		"ROLLOUTD_LISTEN_ADDR":     "127.0.0.1:0",
+		"ROLLOUTD_TRUST_KEYS_FILE": trustFile,
+		"ROLLOUTD_ARTIFACT_DIR":    t.TempDir(),
 	}
 	return func(k string) string { return vals[k] }
 }
@@ -58,6 +78,7 @@ func httpStatus(t *testing.T, url string) int {
 
 func TestServeReportsUnreadyUntilMigratedThenShutsDownCleanly(t *testing.T) {
 	dbURL := testdb.NewURL(t)
+	getenv := testEnv(t, dbURL)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
@@ -66,7 +87,7 @@ func TestServeReportsUnreadyUntilMigratedThenShutsDownCleanly(t *testing.T) {
 	var logs bytes.Buffer
 	go func() {
 		done <- run(ctx, []string{"serve"}, env{
-			getenv:      testEnv(dbURL),
+			getenv:      getenv,
 			stdout:      io.Discard,
 			stderr:      &syncWriter{w: &logs},
 			onListening: func(addr net.Addr) { listening <- addr },
@@ -90,7 +111,7 @@ func TestServeReportsUnreadyUntilMigratedThenShutsDownCleanly(t *testing.T) {
 		t.Errorf("readyz before migrating = %d, want 503", got)
 	}
 
-	migrateErr := run(ctx, []string{"migrate"}, env{getenv: testEnv(dbURL), stdout: io.Discard, stderr: io.Discard})
+	migrateErr := run(ctx, []string{"migrate"}, env{getenv: getenv, stdout: io.Discard, stderr: io.Discard})
 	if migrateErr != nil {
 		t.Fatalf("migrate: %v", migrateErr)
 	}
@@ -136,16 +157,19 @@ func TestRunExplainsMissingConfiguration(t *testing.T) {
 }
 
 // serveForTest runs the real server command, with fast timers, on a migrated database.
-func serveForTest(t *testing.T) (*client.Client, string, func() error) {
+func serveForTest(t *testing.T) (*served, func() error) {
 	t.Helper()
 	dbURL := testdb.NewURL(t)
 	const adminToken = "serve-test-admin-credential"
+	signer, trustFile := writeTrustFile(t)
 	vars := map[string]string{
 		"ROLLOUTD_DATABASE_URL":     dbURL,
 		"ROLLOUTD_ADMIN_TOKEN":      adminToken,
 		"ROLLOUTD_LISTEN_ADDR":      "127.0.0.1:0",
 		"ROLLOUTD_ENGINE_INTERVAL":  "20ms",
 		"ROLLOUTD_ENGINE_LEASE_TTL": "2s",
+		"ROLLOUTD_TRUST_KEYS_FILE":  trustFile,
+		"ROLLOUTD_ARTIFACT_DIR":     t.TempDir(),
 	}
 	getenv := func(k string) string { return vars[k] }
 
@@ -180,11 +204,19 @@ func serveForTest(t *testing.T) (*client.Client, string, func() error) {
 			return errors.New("the server didn't shut down")
 		}
 	}
-	return client.New(base, adminToken, nil), base, stop
+	return &served{admin: client.New(base, adminToken, nil), base: base, signer: signer}, stop
 }
 
-func setUpRollout(t *testing.T, ctx context.Context, admin *client.Client, policy rollout.PolicySpec, devices int) (apiv1.Rollout, []apiv1.Device) {
+// served is a running server, and the key it trusts.
+type served struct {
+	admin  *client.Client
+	base   string
+	signer ed25519.PrivateKey
+}
+
+func setUpRollout(t *testing.T, ctx context.Context, srv *served, policy rollout.PolicySpec, devices int) (apiv1.Rollout, []apiv1.Device) {
 	t.Helper()
+	admin := srv.admin
 	if _, err := admin.CreateFleet(ctx, apiv1.CreateFleetRequest{Name: "lab-a"}); err != nil {
 		t.Fatalf("CreateFleet: %v", err)
 	}
@@ -196,12 +228,16 @@ func setUpRollout(t *testing.T, ctx context.Context, admin *client.Client, polic
 	if err != nil {
 		t.Fatalf("RegisterDevices: %v", err)
 	}
-	artifact, err := admin.CreateArtifact(ctx, apiv1.CreateArtifactRequest{
-		Name: "demo-app", Version: "1.4.0", Platform: "linux/arm64", ReleaseCounter: 14, SizeBytes: 1,
-		SHA256: strings.Repeat("a", 64),
-	})
+	content := []byte(strings.Repeat("artifact", 1000))
+	_, envelope := signingtest.Signed(t, srv.signer, signing.Meta{
+		Name: "demo-app", Version: "1.4.0", Platform: "linux/arm64", ReleaseCounter: 14, ChunkSize: 1024,
+	}, content)
+	artifact, err := admin.CreateArtifact(ctx, envelope)
 	if err != nil {
 		t.Fatalf("CreateArtifact: %v", err)
+	}
+	if err := admin.UploadArtifactContent(ctx, artifact.ID, bytes.NewReader(content), int64(len(content))); err != nil {
+		t.Fatalf("UploadArtifactContent: %v", err)
 	}
 	created, err := admin.CreateRollout(ctx, "lab-a", apiv1.CreateRolloutRequest{Name: "demo", ArtifactID: artifact.ID, Policy: policy})
 	if err != nil {
@@ -216,8 +252,9 @@ func setUpRollout(t *testing.T, ctx context.Context, admin *client.Client, polic
 
 // runDevices polls every device until the rollout finishes, reporting each assignment
 // with the outcome that outcome chooses. It returns the final status.
-func runDevices(t *testing.T, ctx context.Context, admin *client.Client, base string, r apiv1.Rollout, devices []apiv1.Device, outcome func(apiv1.DeviceAssignment) rollout.AssignmentState) apiv1.Rollout {
+func runDevices(t *testing.T, ctx context.Context, srv *served, r apiv1.Rollout, devices []apiv1.Device, outcome func(apiv1.DeviceAssignment) rollout.AssignmentState) apiv1.Rollout {
 	t.Helper()
+	admin, base := srv.admin, srv.base
 	sequences := make(map[string]int64, len(devices))
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
@@ -260,16 +297,16 @@ func runDevices(t *testing.T, ctx context.Context, admin *client.Client, base st
 func intPtr(v int) *int { return &v }
 
 func TestServeRunsARolloutToCompletionOnTheRealClock(t *testing.T) {
-	admin, base, stop := serveForTest(t)
+	srv, stop := serveForTest(t)
 	ctx := t.Context()
 	noSoak := rollout.Duration(0)
 	policy := rollout.PolicySpec{
 		Stages: []rollout.StageSpec{{Percent: 10, Soak: &noSoak}, {Percent: 50, Soak: &noSoak}, {Percent: 100, Soak: &noSoak}},
 		Safety: rollout.SafetySpec{MaxFailureBPS: intPtr(200), RequiredCoverageBPS: intPtr(rollout.FullBPS)},
 	}
-	r, devices := setUpRollout(t, ctx, admin, policy, 20)
+	r, devices := setUpRollout(t, ctx, srv, policy, 20)
 
-	final := runDevices(t, ctx, admin, base, r, devices, func(apiv1.DeviceAssignment) rollout.AssignmentState {
+	final := runDevices(t, ctx, srv, r, devices, func(apiv1.DeviceAssignment) rollout.AssignmentState {
 		return rollout.AssignmentSucceeded
 	})
 	if final.State != rollout.StateCompleted {
@@ -291,16 +328,16 @@ func TestServeRunsARolloutToCompletionOnTheRealClock(t *testing.T) {
 }
 
 func TestServeHaltsABadReleaseInItsFirstStage(t *testing.T) {
-	admin, base, stop := serveForTest(t)
+	srv, stop := serveForTest(t)
 	ctx := t.Context()
 	noSoak := rollout.Duration(0)
 	policy := rollout.PolicySpec{
 		Stages: []rollout.StageSpec{{Percent: 10, Soak: &noSoak}, {Percent: 100, Soak: &noSoak}},
 		Safety: rollout.SafetySpec{MaxFailureBPS: intPtr(200)},
 	}
-	r, devices := setUpRollout(t, ctx, admin, policy, 100)
+	r, devices := setUpRollout(t, ctx, srv, policy, 100)
 
-	final := runDevices(t, ctx, admin, base, r, devices, func(apiv1.DeviceAssignment) rollout.AssignmentState {
+	final := runDevices(t, ctx, srv, r, devices, func(apiv1.DeviceAssignment) rollout.AssignmentState {
 		return rollout.AssignmentFailed
 	})
 	if final.State != rollout.StateHalted {
@@ -320,13 +357,39 @@ func TestServeHaltsABadReleaseInItsFirstStage(t *testing.T) {
 	}
 }
 
+func TestServeRefusesAMissingOrEmptyTrustList(t *testing.T) {
+	dbURL := testdb.NewURL(t)
+	emptyFile := filepath.Join(t.TempDir(), "empty.pem")
+	if err := os.WriteFile(emptyFile, nil, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	for name, path := range map[string]string{"missing": filepath.Join(t.TempDir(), "absent"), "empty": emptyFile} {
+		t.Run(name, func(t *testing.T) {
+			vars := map[string]string{
+				"ROLLOUTD_DATABASE_URL":    dbURL,
+				"ROLLOUTD_ADMIN_TOKEN":     strings.Repeat("x", 32),
+				"ROLLOUTD_LISTEN_ADDR":     "127.0.0.1:0",
+				"ROLLOUTD_TRUST_KEYS_FILE": path,
+				"ROLLOUTD_ARTIFACT_DIR":    t.TempDir(),
+			}
+			err := run(t.Context(), []string{"serve"}, env{getenv: func(k string) string { return vars[k] }, stdout: io.Discard, stderr: io.Discard})
+			if err == nil || !strings.Contains(err.Error(), "trust list") {
+				t.Fatalf("error = %v, want a refusal to start", err)
+			}
+		})
+	}
+}
+
 func TestServeCanRunWithoutTheEngine(t *testing.T) {
 	dbURL := testdb.NewURL(t)
+	_, trustFile := writeTrustFile(t)
 	vars := map[string]string{
-		"ROLLOUTD_DATABASE_URL":   dbURL,
-		"ROLLOUTD_ADMIN_TOKEN":    strings.Repeat("x", 32),
-		"ROLLOUTD_LISTEN_ADDR":    "127.0.0.1:0",
-		"ROLLOUTD_ENGINE_ENABLED": "false",
+		"ROLLOUTD_DATABASE_URL":    dbURL,
+		"ROLLOUTD_ADMIN_TOKEN":     strings.Repeat("x", 32),
+		"ROLLOUTD_LISTEN_ADDR":     "127.0.0.1:0",
+		"ROLLOUTD_ENGINE_ENABLED":  "false",
+		"ROLLOUTD_TRUST_KEYS_FILE": trustFile,
+		"ROLLOUTD_ARTIFACT_DIR":    t.TempDir(),
 	}
 	getenv := func(k string) string { return vars[k] }
 	ctx, cancel := context.WithCancel(t.Context())

@@ -18,14 +18,12 @@ type Assignment struct {
 	RolloutID  string
 	DeviceID   string
 	Generation int64
+	Kind       string
 	Stage      int
 	State      rollout.AssignmentState
 	IssuedAt   time.Time
-	// ExpiresAt is when the validity lease runs out. A device must not begin
-	// installing after this without polling again.
-	ExpiresAt time.Time
-	Directive rollout.Directive
-	Artifact  Artifact
+	Directive  rollout.Directive
+	Artifact   Artifact
 }
 
 // AuthenticateDevice finds the device a credential belongs to. Decommissioned
@@ -51,7 +49,7 @@ func (s *Store) AuthenticateDevice(ctx context.Context, credentialHash [sha256.S
 //
 // Everything a device does starts by updating its row, which serializes its polls
 // and reports, and gives them all the same lock order.
-func (s *Store) PollAssignment(ctx context.Context, device Device, lease time.Duration) (*Assignment, error) {
+func (s *Store) PollAssignment(ctx context.Context, device Device) (*Assignment, error) {
 	var out *Assignment
 	err := s.inTx(ctx, func(tx pgx.Tx) error {
 		now := s.now()
@@ -59,14 +57,14 @@ func (s *Store) PollAssignment(ctx context.Context, device Device, lease time.Du
 			return err
 		}
 		var err error
-		out, err = renewOpenAssignment(ctx, tx, device.ID, now, lease)
+		out, err = openAssignment(ctx, tx, device.ID)
 		if err != nil || out != nil {
 			return err
 		}
 		if device.Status != rollout.DeviceActive {
 			return nil
 		}
-		out, err = issueAssignment(ctx, tx, device, now, lease)
+		out, err = issueAssignment(ctx, tx, device, now)
 		return err
 	})
 	if err != nil {
@@ -82,18 +80,18 @@ func touchDevice(ctx context.Context, tx pgx.Tx, deviceID string, now time.Time)
 	return nil
 }
 
-// renewOpenAssignment returns the device's open assignment with its directive,
-// renewing the lease only if the device may proceed.
-func renewOpenAssignment(ctx context.Context, tx pgx.Tx, deviceID string, now time.Time, lease time.Duration) (*Assignment, error) {
+// openAssignment returns the device's open assignment with its directive. Nothing here
+// needs a lock: the directive is advice, and whether the device may start installing is
+// decided when it asks (see RecordReport).
+func openAssignment(ctx context.Context, tx pgx.Tx, deviceID string) (*Assignment, error) {
 	a := Assignment{DeviceID: deviceID}
 	var rolloutState rollout.State
 	var artifactID string
 	err := tx.QueryRow(ctx, `
-		SELECT a.id, a.rollout_id, a.generation, a.stage_ordinal, a.state, a.issued_at, a.expires_at, r.state, r.artifact_id
+		SELECT a.id, a.rollout_id, a.generation, a.kind, a.stage_ordinal, a.state, a.issued_at, r.state, r.artifact_id
 		FROM assignments a JOIN rollouts r ON r.id = a.rollout_id
-		WHERE a.device_id = $1 AND a.finished_at IS NULL
-		FOR UPDATE OF a`, deviceID).Scan(
-		&a.ID, &a.RolloutID, &a.Generation, &a.Stage, &a.State, &a.IssuedAt, &a.ExpiresAt, &rolloutState, &artifactID)
+		WHERE a.device_id = $1 AND a.finished_at IS NULL`, deviceID).Scan(
+		&a.ID, &a.RolloutID, &a.Generation, &a.Kind, &a.Stage, &a.State, &a.IssuedAt, &rolloutState, &artifactID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -102,12 +100,6 @@ func renewOpenAssignment(ctx context.Context, tx pgx.Tx, deviceID string, now ti
 	}
 
 	a.Directive = rollout.DirectiveFor(rolloutState, a.State)
-	if a.Directive == rollout.DirectiveProceed {
-		a.ExpiresAt = now.Add(lease)
-		if _, err := tx.Exec(ctx, `UPDATE assignments SET expires_at = $2 WHERE id = $1`, a.ID, a.ExpiresAt); err != nil {
-			return nil, fmt.Errorf("renew assignment lease: %w", err)
-		}
-	}
 	a.Artifact, err = readArtifact(ctx, tx, artifactID)
 	if err != nil {
 		return nil, err
@@ -119,13 +111,13 @@ func renewOpenAssignment(ctx context.Context, tx pgx.Tx, deviceID string, now ti
 // lock on the rollout row serializes this with pause, halt, and abort. If one of
 // those is committing, Postgres waits for it and then rechecks the state condition,
 // so an assignment can't be issued once the rollout has stopped.
-func issueAssignment(ctx context.Context, tx pgx.Tx, device Device, now time.Time, lease time.Duration) (*Assignment, error) {
+func issueAssignment(ctx context.Context, tx pgx.Tx, device Device, now time.Time) (*Assignment, error) {
 	a := Assignment{
 		DeviceID:   device.ID,
 		Generation: 1,
+		Kind:       "forward",
 		State:      rollout.AssignmentAssigned,
 		IssuedAt:   now,
-		ExpiresAt:  now.Add(lease),
 		Directive:  rollout.DirectiveProceed,
 	}
 	var artifactID string
@@ -148,9 +140,9 @@ func issueAssignment(ctx context.Context, tx pgx.Tx, device Device, now time.Tim
 	}
 
 	err = tx.QueryRow(ctx, `
-		INSERT INTO assignments (rollout_id, device_id, generation, kind, stage_ordinal, issued_at, expires_at)
-		VALUES ($1, $2, $3, 'forward', $4, $5, $6)
-		RETURNING id`, a.RolloutID, a.DeviceID, a.Generation, a.Stage, a.IssuedAt, a.ExpiresAt).Scan(&a.ID)
+		INSERT INTO assignments (rollout_id, device_id, generation, kind, stage_ordinal, issued_at)
+		VALUES ($1, $2, $3, 'forward', $4, $5)
+		RETURNING id`, a.RolloutID, a.DeviceID, a.Generation, a.Stage, a.IssuedAt).Scan(&a.ID)
 	if err != nil {
 		return nil, fmt.Errorf("insert assignment: %w", err)
 	}
@@ -173,4 +165,28 @@ func supersedeUnstarted(ctx context.Context, tx pgx.Tx, rolloutID string, now ti
 		return fmt.Errorf("supersede assignments: %w", err)
 	}
 	return nil
+}
+
+// ErrNoOpenAssignment reports that a device has no current reason to fetch an artifact.
+var ErrNoOpenAssignment = errors.New("this device has no open assignment for this artifact")
+
+// DeviceArtifact returns an artifact for a device to fetch. It requires an open assignment,
+// so cancelling an assignment also cuts off its download.
+func (s *Store) DeviceArtifact(ctx context.Context, deviceID, artifactID string) (Artifact, error) {
+	if !rollout.ValidUUID(artifactID) {
+		return Artifact{}, notFound("artifact", artifactID)
+	}
+	var assigned bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM assignments a JOIN rollouts r ON r.id = a.rollout_id
+			WHERE a.device_id = $1 AND r.artifact_id = $2 AND a.finished_at IS NULL)`,
+		deviceID, artifactID).Scan(&assigned)
+	if err != nil {
+		return Artifact{}, fmt.Errorf("check assignment: %w", err)
+	}
+	if !assigned {
+		return Artifact{}, ErrNoOpenAssignment
+	}
+	return readArtifact(ctx, s.pool, artifactID)
 }

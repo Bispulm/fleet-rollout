@@ -14,13 +14,6 @@ import (
 	"github.com/Bispulm/fleet-rollout/internal/rollout"
 )
 
-// Why a report was recorded but not applied.
-const (
-	IgnoredAssignmentFinished = "assignment_finished"
-	IgnoredOutOfOrder         = "out_of_order"
-	IgnoredInvalidProgression = "invalid_progression"
-)
-
 var (
 	// ErrReportConflict reports a sequence number already used for a different
 	// report. Retries are always identical, so this means something else is wrong.
@@ -44,7 +37,9 @@ type Report struct {
 }
 
 // ReportResult says what became of a report. Duplicate means this exact report was
-// already recorded. IgnoredReason explains a new report that couldn't be applied.
+// already recorded, and the rest then describes what became of the original, so that a
+// device that lost the first response learns the same thing from a retry. IgnoredReason
+// explains a report that couldn't be applied.
 type ReportResult struct {
 	Applied       bool
 	Duplicate     bool
@@ -69,6 +64,7 @@ type openReportedAssignment struct {
 	state        rollout.AssignmentState
 	lastSequence int64
 	release      int64
+	rolloutState rollout.State
 }
 
 // RecordReport applies a device's report. Every new report goes into the event log,
@@ -96,20 +92,27 @@ func (s *Store) RecordReport(ctx context.Context, r Report) (ReportResult, error
 		if err := touchDevice(ctx, tx, r.DeviceID, now); err != nil {
 			return err
 		}
+		if err := lockRolloutForClaim(ctx, tx, r); err != nil {
+			return err
+		}
 		current, err := lockReportedAssignment(ctx, tx, r)
 		if err != nil {
 			return err
 		}
 
 		var existing []byte
-		err = tx.QueryRow(ctx, `SELECT payload_digest FROM device_events WHERE device_id = $1 AND sequence = $2`,
-			r.DeviceID, r.Sequence).Scan(&existing)
+		var applied bool
+		var ignored string
+		err = tx.QueryRow(ctx, `
+			SELECT payload_digest, applied, coalesce(ignored_reason, '')
+			FROM device_events WHERE device_id = $1 AND sequence = $2`,
+			r.DeviceID, r.Sequence).Scan(&existing, &applied, &ignored)
 		switch {
 		case err == nil:
 			if !bytes.Equal(existing, digest[:]) {
 				return ErrReportConflict
 			}
-			result = ReportResult{Duplicate: true}
+			result = ReportResult{Duplicate: true, Applied: applied, IgnoredReason: ignored}
 			return nil
 		case !errors.Is(err, pgx.ErrNoRows):
 			return fmt.Errorf("query earlier report: %w", err)
@@ -139,18 +142,49 @@ func (s *Store) RecordReport(ctx context.Context, r Report) (ReportResult, error
 	return result, nil
 }
 
+// lockRolloutForClaim locks the rollout against a change of state if this report asks to
+// start installing. Halting, aborting, and completing all update the assignment, so its row
+// lock already orders them against the report. A pause doesn't, so without this a device
+// could start installing just after a pause committed. The rollout is locked before the
+// assignment, in the order transitions use, and only for a claim, so that reports from
+// devices already in flight never wait on the engine.
+func lockRolloutForClaim(ctx context.Context, tx pgx.Tx, r Report) error {
+	if !r.State.InFlight() {
+		return nil
+	}
+	// The state can only move forward, so if this unlocked read finds the device in flight
+	// or finished, it still is, and there's nothing to order.
+	var state rollout.AssignmentState
+	err := tx.QueryRow(ctx, `SELECT state FROM assignments WHERE id = $1 AND device_id = $2`,
+		r.AssignmentID, r.DeviceID).Scan(&state)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return nil // lockReportedAssignment reports it.
+	case err != nil:
+		return fmt.Errorf("read assignment: %w", err)
+	case state.InFlight() || state.IsTerminal():
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `
+		SELECT 1 FROM rollouts ro JOIN assignments a ON a.rollout_id = ro.id
+		WHERE a.id = $1 FOR SHARE OF ro`, r.AssignmentID); err != nil {
+		return fmt.Errorf("lock rollout: %w", err)
+	}
+	return nil
+}
+
 // lockReportedAssignment checks that a report belongs to the device that sent it.
 // Someone else's assignment is reported as not found, which reveals nothing about it.
 func lockReportedAssignment(ctx context.Context, tx pgx.Tx, r Report) (openReportedAssignment, error) {
 	var a openReportedAssignment
 	err := tx.QueryRow(ctx, `
-		SELECT a.device_id, a.rollout_id, a.generation, a.kind, a.state, a.last_sequence, ar.release_counter
+		SELECT a.device_id, a.rollout_id, a.generation, a.kind, a.state, a.last_sequence, ar.release_counter, ro.state
 		FROM assignments a
 		JOIN rollouts ro ON ro.id = a.rollout_id
 		JOIN artifacts ar ON ar.id = ro.artifact_id
 		WHERE a.id = $1
 		FOR UPDATE OF a`, r.AssignmentID).Scan(
-		&a.deviceID, &a.rolloutID, &a.generation, &a.kind, &a.state, &a.lastSequence, &a.release)
+		&a.deviceID, &a.rolloutID, &a.generation, &a.kind, &a.state, &a.lastSequence, &a.release, &a.rolloutState)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && a.deviceID != r.DeviceID) {
 		return a, notFound("assignment", r.AssignmentID)
 	}
@@ -166,11 +200,15 @@ func lockReportedAssignment(ctx context.Context, tx pgx.Tx, r Report) (openRepor
 func decideReport(current openReportedAssignment, r Report) ReportResult {
 	switch {
 	case current.state.IsTerminal():
-		return ReportResult{IgnoredReason: IgnoredAssignmentFinished}
+		return ReportResult{IgnoredReason: rollout.IgnoredAssignmentFinished}
 	case r.Sequence <= current.lastSequence:
-		return ReportResult{IgnoredReason: IgnoredOutOfOrder}
+		return ReportResult{IgnoredReason: rollout.IgnoredOutOfOrder}
 	case !rollout.CanProgress(current.state, r.State):
-		return ReportResult{IgnoredReason: IgnoredInvalidProgression}
+		return ReportResult{IgnoredReason: rollout.IgnoredInvalidProgression}
+	case r.State.InFlight() && !current.state.InFlight() &&
+		rollout.DirectiveFor(current.rolloutState, current.state) == rollout.DirectiveHold:
+		// The device asks to start installing, and it may not yet.
+		return ReportResult{IgnoredReason: rollout.IgnoredOnHold}
 	}
 	return ReportResult{Applied: true}
 }

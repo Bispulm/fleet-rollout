@@ -1,11 +1,19 @@
 package api_test
 
 import (
+	"context"
+	"fmt"
+	"io"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/Bispulm/fleet-rollout/internal/api"
 	"github.com/Bispulm/fleet-rollout/internal/apiv1"
+	"github.com/Bispulm/fleet-rollout/internal/artifactstore"
 	"github.com/Bispulm/fleet-rollout/internal/rollout"
 )
 
@@ -20,7 +28,13 @@ type deviceFixture struct {
 
 func newDeviceFixture(t *testing.T) deviceFixture {
 	t.Helper()
-	h := newHarness(t)
+	return newDeviceFixtureWith(t, nil)
+}
+
+// newDeviceFixtureWith lets a test change the server's options.
+func newDeviceFixtureWith(t *testing.T, edit func(*api.Options)) deviceFixture {
+	t.Helper()
+	h := newHarnessWith(t, edit)
 	h.createFleet("lab-a")
 	devices := h.registerDevices("lab-a", 20)
 	tokens := make(map[string]string, len(devices))
@@ -129,9 +143,6 @@ func TestPollReturnsAnAssignmentWithItsArtifactAndALease(t *testing.T) {
 	if a.Artifact.ID != f.rollout.ArtifactID || len(a.Artifact.SHA256) != 64 {
 		t.Fatalf("artifact = %+v", a.Artifact)
 	}
-	if a.ExpiresAt.IsZero() {
-		t.Fatal("no lease expiry")
-	}
 	if got := f.poll(f.later); got.Assignment != nil {
 		t.Fatalf("a later-stage device got %+v", got.Assignment)
 	}
@@ -181,7 +192,8 @@ func TestDuplicateAndConflictingReports(t *testing.T) {
 	}
 	var repeat apiv1.ReportResponse
 	decode(t, raw, &repeat)
-	if !repeat.Duplicate || repeat.Applied {
+	// A device that lost the first response learns from the repeat that it was applied.
+	if !repeat.Duplicate || !repeat.Applied {
 		t.Fatalf("repeat = %+v", repeat)
 	}
 
@@ -275,5 +287,161 @@ func TestStatusCountsDevicesInFlight(t *testing.T) {
 	f.expect(http.StatusOK, http.MethodGet, "/v1/rollouts/"+f.rollout.ID, nil, &r)
 	if r.Stages[0].InFlight != 1 {
 		t.Fatalf("in flight = %d", r.Stages[0].InFlight)
+	}
+}
+
+// A fleet reconnecting all at once must be turned away quickly, rather than queuing without a
+// limit. Device requests share a bounded number of slots, and the rest get told when to retry.
+func TestDeviceRequestsBeyondTheLimitAreShedWithRetryAfter(t *testing.T) {
+	h := newHarnessWith(t, func(o *api.Options) { o.MaxDeviceRequests = 1 })
+	h.createFleet("lab-a")
+	devices := h.registerDevices("lab-a", 2)
+
+	// One device holds the only slot, with a request whose body never finishes arriving. It's
+	// written by hand, because an HTTP client buffers a streamed request and wouldn't send it.
+	var conn net.Conn
+	hold := func() {
+		t.Helper()
+		var err error
+		conn, err = (&net.Dialer{}).DialContext(t.Context(), "tcp", strings.TrimPrefix(h.base, "http://"))
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		if _, err := fmt.Fprintf(conn, "POST /v1/device/reports HTTP/1.1\r\nHost: test\r\nAuthorization: Bearer %s\r\n"+
+			"Content-Type: application/json\r\nContent-Length: 1000\r\n\r\n{\"sequence\":", devices[0].Token); err != nil {
+			t.Fatalf("write held request: %v", err)
+		}
+	}
+	// held reports whether the held request still has the slot. If a poll got there first,
+	// the held request was the one turned away, and the server has answered it.
+	held := func() bool {
+		_ = conn.SetReadDeadline(time.Now().Add(time.Millisecond))
+		n, _ := conn.Read(make([]byte, 1))
+		return n == 0
+	}
+	hold()
+	// This runs before the server's own cleanup, so a failure here can't leave the server
+	// waiting forever on the held request.
+	t.Cleanup(func() { _ = conn.Close() })
+	// A broken limiter would make a poll wait for the slot, so a timeout turns that into a failure.
+	poller := &http.Client{Timeout: 2 * time.Second}
+
+	var shed http.Header
+	deadline := time.Now().Add(5 * time.Second)
+	for shed == nil && time.Now().Before(deadline) {
+		if !held() {
+			_ = conn.Close()
+			hold()
+		}
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, h.base+"/v1/device/poll", http.NoBody)
+		if err != nil {
+			t.Fatalf("build request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+devices[1].Token)
+		resp, err := poller.Do(req)
+		if err != nil {
+			t.Fatalf("poll: %v", err)
+		}
+		raw, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode == http.StatusServiceUnavailable {
+			if !strings.Contains(string(raw), apiv1.CodeOverloaded) {
+				t.Fatalf("body = %s", raw)
+			}
+			shed = resp.Header
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if shed == nil {
+		t.Fatal("the second device was never turned away")
+	}
+	seconds, err := strconv.Atoi(shed.Get("Retry-After"))
+	if err != nil || seconds < 1 || seconds > 30 {
+		t.Fatalf("Retry-After = %q", shed.Get("Retry-After"))
+	}
+
+	// Once the slot is free, the other device gets through.
+	_ = conn.Close()
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		status, _ := h.doWithAuth("Bearer "+devices[1].Token, http.MethodPost, "/v1/device/poll", nil)
+		if status == http.StatusOK {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after the slot freed up: status = %d", status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Admin requests don't compete with devices for slots.
+	h.expect(http.StatusOK, http.MethodGet, "/v1/fleets/lab-a", nil, nil)
+}
+
+// gatedStore holds every Open until release is closed, so a download can be kept in progress.
+type gatedStore struct {
+	artifactstore.Store
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (g *gatedStore) Open(ctx context.Context, id string) (artifactstore.Object, error) {
+	g.entered <- struct{}{}
+	select {
+	case <-g.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return g.Store.Open(ctx, id)
+}
+
+func TestDownloadsDontTakeTheSlotsPollsAndReportsNeed(t *testing.T) {
+	gate := &gatedStore{entered: make(chan struct{}, 4), release: make(chan struct{})}
+	f := newDeviceFixtureWith(t, func(o *api.Options) {
+		o.MaxDeviceRequests = 1
+		o.MaxDeviceDownloads = 1
+		gate.Store = o.Artifacts
+		o.Artifacts = gate
+	})
+	a := f.poll(f.first).Assignment
+	content := "/v1/device/artifacts/" + a.Artifact.ID + "/content"
+
+	downloaded := make(chan int, 1)
+	go func() {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, f.base+content, http.NoBody)
+		if err != nil {
+			downloaded <- 0
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+f.first)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			downloaded <- 0
+			return
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		downloaded <- resp.StatusCode
+	}()
+	select {
+	case <-gate.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the download never started")
+	}
+
+	// A download in progress leaves room for a device to poll, and to report.
+	f.poll(f.second)
+	if status, raw := f.report(f.first, reportFor(a, 1, rollout.AssignmentDownloading)); status != http.StatusOK {
+		t.Fatalf("report during a download: status = %d, body: %s", status, raw)
+	}
+	// Another download waits for a download slot.
+	got, raw := f.deviceGet(f.first, content, "", "")
+	if got.StatusCode != http.StatusServiceUnavailable || !strings.Contains(string(raw), apiv1.CodeOverloaded) {
+		t.Fatalf("second download: status = %d, body: %s", got.StatusCode, raw)
+	}
+
+	close(gate.release)
+	if status := <-downloaded; status != http.StatusOK {
+		t.Fatalf("first download: status = %d", status)
 	}
 }

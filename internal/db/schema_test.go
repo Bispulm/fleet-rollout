@@ -44,8 +44,9 @@ func newFixture(t *testing.T, ctx context.Context) fixture {
 	mustScan(t, f.pool.QueryRow(ctx, `INSERT INTO fleets (name) VALUES ('lab-a') RETURNING id`), &f.fleetID)
 	mustExec(t, ctx, f.pool, `INSERT INTO devices (id, fleet_id, platform, credential_hash)
 		VALUES ($1, $2, 'linux/arm64', sha256($1::text::bytea))`, f.deviceID, f.fleetID)
-	mustScan(t, f.pool.QueryRow(ctx, `INSERT INTO artifacts (name, version, platform, release_counter, size_bytes, sha256)
-		VALUES ('demo', '1.0.0', 'linux/arm64', 10, 1024, $1) RETURNING id`, make([]byte, 32)), &f.artifact)
+	mustScan(t, f.pool.QueryRow(ctx, `INSERT INTO artifacts
+		(name, version, platform, release_counter, size_bytes, sha256, envelope, chunk_size, content_ready_at)
+		VALUES ('demo', '1.0.0', 'linux/arm64', 10, 1024, $1, '{}', 1024, now()) RETURNING id`, make([]byte, 32)), &f.artifact)
 	f.rolloutID = f.insertRollout(t, ctx, "first")
 	for ordinal, percent := range map[int]int{1: 50, 2: 100} {
 		mustExec(t, ctx, f.pool, `INSERT INTO rollout_stages (rollout_id, ordinal, percent) VALUES ($1, $2, $3)`,
@@ -105,6 +106,29 @@ func TestArtifactsAreUniqueAndImmutable(t *testing.T) {
 	requireSQLState(t, err, sqlUniqueViolation)
 
 	_, err = f.pool.Exec(ctx, `UPDATE artifacts SET size_bytes = 2 WHERE id = $1`, f.artifact)
+	requireSQLState(t, err, sqlRestrictViolation)
+	_, err = f.pool.Exec(ctx, `DELETE FROM artifacts WHERE id = $1`, f.artifact)
+	requireSQLState(t, err, sqlRestrictViolation)
+}
+
+func TestArtifactContentCanBeRecordedOnlyOnce(t *testing.T) {
+	ctx := testContext(t)
+	f := newFixture(t, ctx)
+	var id string
+	mustScan(t, f.pool.QueryRow(ctx, `INSERT INTO artifacts (name, version, platform, release_counter, size_bytes, sha256)
+		VALUES ('other', '1.0.0', 'linux/arm64', 1, 1, $1) RETURNING id`, make([]byte, 32)), &id)
+
+	// Content needs an envelope, so nothing can be marked ready without a signed manifest.
+	_, err := f.pool.Exec(ctx, `UPDATE artifacts SET content_ready_at = now() WHERE id = $1`, id)
+	requireSQLState(t, err, sqlCheckViolation)
+
+	var signed string
+	mustScan(t, f.pool.QueryRow(ctx, `INSERT INTO artifacts (name, version, platform, release_counter, size_bytes, sha256, envelope, chunk_size)
+		VALUES ('other', '2.0.0', 'linux/arm64', 2, 1, $1, '{}', 1024) RETURNING id`, make([]byte, 32)), &signed)
+	mustExec(t, ctx, f.pool, `UPDATE artifacts SET content_ready_at = now() WHERE id = $1`, signed)
+	_, err = f.pool.Exec(ctx, `UPDATE artifacts SET content_ready_at = now() - interval '1 day' WHERE id = $1`, signed)
+	requireSQLState(t, err, sqlRestrictViolation)
+	_, err = f.pool.Exec(ctx, `UPDATE artifacts SET envelope = 'x' WHERE id = $1`, signed)
 	requireSQLState(t, err, sqlRestrictViolation)
 }
 
@@ -260,8 +284,8 @@ func exposedFixture(t *testing.T, ctx context.Context) fixture {
 func (f fixture) assign(ctx context.Context, generation int) (string, error) {
 	var id string
 	err := f.pool.QueryRow(ctx, `INSERT INTO assignments
-		(rollout_id, device_id, generation, kind, stage_ordinal, issued_at, expires_at)
-		VALUES ($1, $2, $3, 'forward', 1, now(), now() + interval '1 hour') RETURNING id`,
+		(rollout_id, device_id, generation, kind, stage_ordinal, issued_at)
+		VALUES ($1, $2, $3, 'forward', 1, now()) RETURNING id`,
 		f.rolloutID, f.deviceID, generation).Scan(&id)
 	return id, err
 }
@@ -271,8 +295,8 @@ func TestDeviceHasAtMostOneOpenAssignment(t *testing.T) {
 	f := exposedFixture(t, ctx)
 	assignRollback := func() error {
 		_, err := f.pool.Exec(ctx, `INSERT INTO assignments
-			(rollout_id, device_id, generation, kind, stage_ordinal, issued_at, expires_at)
-			VALUES ($1, $2, 2, 'rollback', 1, now(), now() + interval '1 hour')`, f.rolloutID, f.deviceID)
+			(rollout_id, device_id, generation, kind, stage_ordinal, issued_at)
+			VALUES ($1, $2, 2, 'rollback', 1, now())`, f.rolloutID, f.deviceID)
 		return err
 	}
 
@@ -311,8 +335,8 @@ func TestAssignmentRequiresRolloutMembership(t *testing.T) {
 	mustExec(t, ctx, f.pool, `INSERT INTO devices (id, fleet_id, platform, credential_hash)
 		VALUES ('outsider', $1, 'linux/arm64', sha256('outsider'))`, f.fleetID)
 	_, err := f.pool.Exec(ctx, `INSERT INTO assignments
-		(rollout_id, device_id, kind, stage_ordinal, issued_at, expires_at)
-		VALUES ($1, 'outsider', 'forward', 1, now(), now() + interval '1 hour')`, f.rolloutID)
+		(rollout_id, device_id, kind, stage_ordinal, issued_at)
+		VALUES ($1, 'outsider', 'forward', 1, now())`, f.rolloutID)
 	requireSQLState(t, err, "23503")
 }
 
@@ -347,8 +371,8 @@ func TestMemberHasAtMostOneForwardAssignmentPerRollout(t *testing.T) {
 
 	// A rollback is a different kind of instruction, so it's allowed.
 	mustExec(t, ctx, f.pool, `INSERT INTO assignments
-		(rollout_id, device_id, generation, kind, stage_ordinal, issued_at, expires_at)
-		VALUES ($1, $2, 2, 'rollback', 1, now(), now() + interval '1 hour')`, f.rolloutID, f.deviceID)
+		(rollout_id, device_id, generation, kind, stage_ordinal, issued_at)
+		VALUES ($1, $2, 2, 'rollback', 1, now())`, f.rolloutID, f.deviceID)
 }
 
 func TestDeviceCredentialsAreUnique(t *testing.T) {
@@ -440,5 +464,16 @@ func TestStagePercentCannotChangeEvenInDraft(t *testing.T) {
 	f := newFixture(t, ctx)
 	// The policy is immutable from creation, and percent is part of it.
 	_, err := f.pool.Exec(ctx, `UPDATE rollout_stages SET percent = 99 WHERE rollout_id = $1 AND ordinal = 1`, f.rolloutID)
+	requireSQLState(t, err, sqlRestrictViolation)
+}
+
+func TestRolloutsCannotUseAnArtifactWithoutItsContent(t *testing.T) {
+	ctx := testContext(t)
+	f := newFixture(t, ctx)
+	var unready string
+	mustScan(t, f.pool.QueryRow(ctx, `INSERT INTO artifacts (name, version, platform, release_counter, size_bytes, sha256, envelope, chunk_size)
+		VALUES ('demo', '2.0.0', 'linux/arm64', 20, 1024, $1, '{}', 1024) RETURNING id`, make([]byte, 32)), &unready)
+	_, err := f.pool.Exec(ctx, `INSERT INTO rollouts (fleet_id, artifact_id, name, policy, policy_digest, created_at)
+		VALUES ($1, $2, 'unready', '{}', $3, now())`, f.fleetID, unready, make([]byte, 32))
 	requireSQLState(t, err, sqlRestrictViolation)
 }

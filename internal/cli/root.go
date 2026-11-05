@@ -70,6 +70,6 @@ func Execute(ctx context.Context, args []string, stdout, stderr io.Writer, geten
 		}
 		return nil
 	}
-	root.AddCommand(a.fleetCommand(), a.deviceCommand(), a.artifactCommand(), a.rolloutCommand())
+	root.AddCommand(a.keyCommand(), a.fleetCommand(), a.deviceCommand(), a.artifactCommand(), a.rolloutCommand())
 	return root.ExecuteContext(ctx)
 }
