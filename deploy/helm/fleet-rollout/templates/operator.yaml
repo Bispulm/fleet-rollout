@@ -1,0 +1,128 @@
+{{- if .Values.operator.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "fleet-rollout.name" . }}-operator
+  labels:
+    {{- include "fleet-rollout.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "fleet-rollout.name" . }}-operator
+  labels:
+    {{- include "fleet-rollout.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["rollouts.bispulm.github.io"]
+    resources: ["fleets", "rollouts"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["rollouts.bispulm.github.io"]
+    resources: ["fleets/status", "rollouts/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["rollouts.bispulm.github.io"]
+    resources: ["rollouts/finalizers"]
+    verbs: ["update"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "fleet-rollout.name" . }}-operator
+  labels:
+    {{- include "fleet-rollout.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "fleet-rollout.name" . }}-operator
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "fleet-rollout.name" . }}-operator
+    namespace: {{ .Release.Namespace }}
+---
+# Leader election, so that more than one replica can run.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "fleet-rollout.name" . }}-operator-leader
+  labels:
+    {{- include "fleet-rollout.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "fleet-rollout.name" . }}-operator-leader
+  labels:
+    {{- include "fleet-rollout.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "fleet-rollout.name" . }}-operator-leader
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "fleet-rollout.name" . }}-operator
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fleet-rollout.name" . }}-operator
+  labels:
+    {{- include "fleet-rollout.labels" . | nindent 4 }}
+    app.kubernetes.io/component: operator
+spec:
+  replicas: {{ .Values.operator.replicas }}
+  selector:
+    matchLabels:
+      {{- include "fleet-rollout.selector" . | nindent 6 }}
+      app.kubernetes.io/component: operator
+  template:
+    metadata:
+      labels:
+        {{- include "fleet-rollout.selector" . | nindent 8 }}
+        app.kubernetes.io/component: operator
+    spec:
+      serviceAccountName: {{ include "fleet-rollout.name" . }}-operator
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: operator
+          image: {{ include "fleet-rollout.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - rollout-operator
+            - --api=http://{{ include "fleet-rollout.name" . }}-rolloutd:{{ .Values.rolloutd.service.port }}
+            - --leader-elect
+            - --leader-election-namespace={{ .Release.Namespace }}
+            - --log-level={{ .Values.operator.logLevel }}
+          env:
+            - name: ROLLOUT_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fleet-rollout.adminTokenSecret" . }}
+                  key: admin-token
+          ports:
+            - name: metrics
+              containerPort: 8080
+            - name: probes
+              containerPort: 8081
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: probes
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: probes
+          securityContext:
+            {{- include "fleet-rollout.securityContext" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.operator.resources | nindent 12 }}
+{{- end }}

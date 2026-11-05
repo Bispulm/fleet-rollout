@@ -1,0 +1,6 @@
+apiVersion: v2
+name: fleet-rollout
+description: A control plane for staged software rollouts to device fleets, with its Kubernetes operator.
+type: application
+version: 0.1.0
+appVersion: "dev"
