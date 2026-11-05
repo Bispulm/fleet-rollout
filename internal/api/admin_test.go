@@ -18,6 +18,8 @@ import (
 	"github.com/Bispulm/fleet-rollout/internal/signing/signingtest"
 	"github.com/Bispulm/fleet-rollout/internal/store"
 	"github.com/Bispulm/fleet-rollout/internal/testdb"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 const testAdminToken = "test-admin-credential-value"
@@ -329,4 +331,30 @@ func TestUpdateDeviceStatus(t *testing.T) {
 	}
 	h.problem(http.StatusUnprocessableEntity, http.MethodPatch, "/v1/devices/sim-00000", `{"status":"gone"}`)
 	h.problem(http.StatusNotFound, http.MethodPatch, "/v1/devices/missing", `{"status":"active"}`)
+}
+
+func TestRequestsAreTracedByRoute(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	h := newHarnessWith(t, func(o *api.Options) { o.Tracer = provider })
+	h.expect(http.StatusNotFound, http.MethodGet, "/v1/fleets/missing-fleet", nil, nil)
+	spans := recorder.Ended()
+	if len(spans) != 1 || spans[0].Name() != "GET /v1/fleets/{fleet}" {
+		t.Fatalf("spans = %v, want one named by its route", spanNames(spans))
+	}
+	found := false
+	for _, kv := range spans[0].Attributes() {
+		found = found || (kv.Key == "request_id" && kv.Value.AsString() != "")
+	}
+	if !found {
+		t.Fatal("the span doesn't carry the request ID")
+	}
+}
+
+func spanNames(spans []sdktrace.ReadOnlySpan) []string {
+	names := make([]string, len(spans))
+	for i, s := range spans {
+		names[i] = s.Name()
+	}
+	return names
 }

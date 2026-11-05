@@ -11,6 +11,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/Bispulm/fleet-rollout/internal/artifactstore"
 	"github.com/Bispulm/fleet-rollout/internal/auth"
 	"github.com/Bispulm/fleet-rollout/internal/metrics"
@@ -47,6 +50,8 @@ type Options struct {
 	MaxDeviceDownloads int
 	// Metrics, if set, counts requests, shed requests, and reports.
 	Metrics *metrics.Metrics
+	// Tracer, if set, records a span for each request.
+	Tracer trace.TracerProvider
 }
 
 // Server is the HTTP API. It is safe for concurrent use.
@@ -99,6 +104,10 @@ func New(opts Options) *Server {
 		s.pollInterval = defaultPollInterval
 	}
 	s.handler = observe(s.logger, s.metrics, http.HandlerFunc(s.route))
+	if opts.Tracer != nil {
+		// Spans start before routing, so observe renames each one after its route.
+		s.handler = otelhttp.NewHandler(s.handler, "request", otelhttp.WithTracerProvider(opts.Tracer))
+	}
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
 	if opts.Store != nil {

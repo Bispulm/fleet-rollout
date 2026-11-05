@@ -10,6 +10,10 @@ import (
 	"log/slog"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
+
 	"github.com/Bispulm/fleet-rollout/internal/metrics"
 	"github.com/Bispulm/fleet-rollout/internal/rollout"
 	"github.com/Bispulm/fleet-rollout/internal/store"
@@ -41,6 +45,8 @@ type Options struct {
 	Logger   *slog.Logger
 	// Metrics, if set, counts decisions and halts, and records leadership.
 	Metrics *metrics.Metrics
+	// Tracer, if set, records a span for each rollout evaluated.
+	Tracer trace.TracerProvider
 }
 
 // Engine runs the evaluation loop. Run and Tick must not be called concurrently.
@@ -51,6 +57,7 @@ type Engine struct {
 	leaseTTL time.Duration
 	logger   *slog.Logger
 	metrics  *metrics.Metrics
+	tracer   trace.Tracer
 	fence    *store.Fence
 }
 
@@ -63,6 +70,7 @@ func New(opts Options) *Engine {
 		leaseTTL: opts.LeaseTTL,
 		logger:   opts.Logger,
 		metrics:  opts.Metrics,
+		tracer:   tracerFrom(opts.Tracer),
 	}
 }
 
@@ -145,6 +153,8 @@ func (e *Engine) dropLease(ctx context.Context, cause error) {
 // other failure is logged, and leaves this rollout for the next tick without affecting
 // the others.
 func (e *Engine) advance(ctx context.Context, id string) bool {
+	ctx, span := e.tracer.Start(ctx, "engine.advance", trace.WithAttributes(attribute.String("rollout_id", id)))
+	defer span.End()
 	for range maxStepsPerRollout {
 		result, err := e.store.AdvanceRollout(ctx, id, *e.fence)
 		if errors.Is(err, store.ErrLeaseLost) {
@@ -160,6 +170,9 @@ func (e *Engine) advance(ctx context.Context, id string) bool {
 			return true
 		}
 		e.metrics.Decision(string(result.Event), string(result.HaltReason))
+		span.AddEvent(string(result.Event), trace.WithAttributes(
+			attribute.String("from", string(result.From)), attribute.String("to", string(result.To)),
+			attribute.String("detail", result.Detail)))
 		if result.RolledBack {
 			e.metrics.Decision(string(rollout.EventRollback), "")
 		}
@@ -185,4 +198,11 @@ func (e *Engine) release(ctx context.Context) {
 		e.logger.LogAttrs(ctx, slog.LevelWarn, "release engine lease", slog.Any("error", err))
 	}
 	e.fence = nil
+}
+
+func tracerFrom(provider trace.TracerProvider) trace.Tracer {
+	if provider == nil {
+		provider = noop.NewTracerProvider()
+	}
+	return provider.Tracer("github.com/Bispulm/fleet-rollout/internal/engine")
 }

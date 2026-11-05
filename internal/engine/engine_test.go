@@ -12,6 +12,9 @@ import (
 	"testing"
 	"time"
 
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+
 	"github.com/Bispulm/fleet-rollout/internal/engine"
 	"github.com/Bispulm/fleet-rollout/internal/metrics"
 	"github.com/Bispulm/fleet-rollout/internal/rollout"
@@ -302,5 +305,22 @@ func TestDecisionsHaltsAndLeadershipAreCounted(t *testing.T) {
 	e.Tick(t.Context())
 	if body := scrape(); !strings.Contains(body, "fleet_rollout_engine_leader 0\n") {
 		t.Error("an instance that lost the lease still reports leading")
+	}
+}
+
+func TestEachEvaluationIsTraced(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	f := &fakeStore{acquireOK: true, rollouts: []string{"r1"}, steps: map[string]int{"r1": 1}}
+	e := engine.New(engine.Options{
+		Store: f, Holder: "test", Interval: time.Millisecond, LeaseTTL: time.Minute,
+		Logger: slog.New(slog.DiscardHandler), Tracer: sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)),
+	})
+	e.Tick(t.Context())
+	spans := recorder.Ended()
+	if len(spans) != 1 || spans[0].Name() != "engine.advance" {
+		t.Fatalf("spans = %d, want one engine.advance", len(spans))
+	}
+	if events := spans[0].Events(); len(events) != 1 || events[0].Name != string(rollout.EventCoverageMet) {
+		t.Fatalf("events = %+v, want the decision", events)
 	}
 }

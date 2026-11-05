@@ -10,6 +10,9 @@ import (
 	"runtime/debug"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/Bispulm/fleet-rollout/internal/metrics"
 )
 
@@ -79,6 +82,12 @@ func observe(logger *slog.Logger, m *metrics.Metrics, next http.Handler) http.Ha
 				}
 			}
 			m.Request(r.Pattern, r.Method, rec.status, time.Since(start))
+			if span := trace.SpanFromContext(r.Context()); span.IsRecording() {
+				if r.Pattern != "" {
+					span.SetName(r.Pattern)
+				}
+				span.SetAttributes(attribute.String("request_id", id))
+			}
 			logger.LogAttrs(r.Context(), slog.LevelInfo, "request",
 				slog.String("request_id", id),
 				slog.String("method", r.Method),

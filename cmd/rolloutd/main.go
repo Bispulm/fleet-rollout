@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/Bispulm/fleet-rollout/internal/api"
 	"github.com/Bispulm/fleet-rollout/internal/artifactstore"
@@ -26,6 +27,7 @@ import (
 	"github.com/Bispulm/fleet-rollout/internal/metrics"
 	"github.com/Bispulm/fleet-rollout/internal/signing"
 	"github.com/Bispulm/fleet-rollout/internal/store"
+	"github.com/Bispulm/fleet-rollout/internal/tracing"
 )
 
 const (
@@ -109,6 +111,16 @@ func runServe(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger
 		return err
 	}
 
+	tracer, stopTracing, err := tracing.Setup(ctx, "rolloutd", e.getenv)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_ = stopTracing(ctx)
+	}()
+
 	st := store.New(pool)
 	m := metrics.New()
 	m.ObserveRollouts(st, logger)
@@ -124,6 +136,7 @@ func runServe(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger
 		MaxDeviceRequests:  cfg.MaxDeviceRequests,
 		MaxDeviceDownloads: cfg.MaxDeviceDownloads,
 		Metrics:            m,
+		Tracer:             tracer,
 	})
 
 	stopMetrics, err := serveMetrics(ctx, cfg.MetricsAddr, m, logger, e.onMetrics)
@@ -141,7 +154,7 @@ func runServe(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger
 		e.onListening(listener.Addr())
 	}
 
-	stopEngine, err := startEngine(ctx, cfg, st, logger, m)
+	stopEngine, err := startEngine(ctx, cfg, st, logger, m, tracer)
 	if err != nil {
 		_ = listener.Close()
 		return err
@@ -158,7 +171,7 @@ func runServe(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger
 
 // startEngine runs the rollout engine in the background, and returns a function that
 // stops it and waits for it to give up its lease.
-func startEngine(ctx context.Context, cfg config.Config, st *store.Store, logger *slog.Logger, m *metrics.Metrics) (func(), error) {
+func startEngine(ctx context.Context, cfg config.Config, st *store.Store, logger *slog.Logger, m *metrics.Metrics, tracer trace.TracerProvider) (func(), error) {
 	if !cfg.EngineEnabled {
 		logger.LogAttrs(ctx, slog.LevelInfo, "rollout engine disabled")
 		return func() {}, nil
@@ -176,6 +189,7 @@ func startEngine(ctx context.Context, cfg config.Config, st *store.Store, logger
 		LeaseTTL: cfg.EngineLeaseTTL,
 		Logger:   logger,
 		Metrics:  m,
+		Tracer:   tracer,
 	})
 	go func() {
 		defer close(done)
