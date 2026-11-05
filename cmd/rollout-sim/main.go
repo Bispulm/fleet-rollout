@@ -314,8 +314,7 @@ func printReport(w io.Writer, r sim.Report, asJSON bool) error {
 	fmt.Fprintf(&b, "updated %d of %d devices; failures %s; bad installs %d\n",
 		r.Updated, r.Scenario.Devices, counts(r.Failures), r.BadInstalls)
 	fmt.Fprintf(&b, "faults injected: %s; agent crashes %d\n", counts(r.Faults), r.Crashes)
-	fmt.Fprintf(&b, "downloaded %d bytes, %.2fx the artifact bytes the updated devices needed\n",
-		r.BytesDownloaded, ratio(r.BytesDownloaded, int64(r.Updated)*r.ArtifactBytes))
+	fmt.Fprintf(&b, "downloaded %d bytes in all, of a %d-byte artifact\n", r.BytesDownloaded, r.ArtifactBytes)
 	fmt.Fprintf(&b, "digest %s\n", r.Digest)
 	_, err := io.WriteString(w, b.String())
 	return err
@@ -335,11 +334,4 @@ func counts(m map[string]int) string {
 		parts[i] = fmt.Sprintf("%s %d", k, m[k])
 	}
 	return strings.Join(parts, ", ")
-}
-
-func ratio(a, b int64) float64 {
-	if b == 0 {
-		return 0
-	}
-	return float64(a) / float64(b)
 }
