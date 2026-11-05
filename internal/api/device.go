@@ -147,13 +147,14 @@ func (s *Server) handleDeviceReport(w http.ResponseWriter, r *http.Request, devi
 
 func deviceAssignmentDocument(a store.Assignment) apiv1.DeviceAssignment {
 	return apiv1.DeviceAssignment{
-		ID:         a.ID,
-		RolloutID:  a.RolloutID,
-		Generation: a.Generation,
-		Stage:      a.Stage,
-		State:      a.State,
-		Directive:  a.Directive,
-		Kind:       a.Kind,
-		Artifact:   artifactDocument(a.Artifact),
+		ID:             a.ID,
+		RolloutID:      a.RolloutID,
+		Generation:     a.Generation,
+		Stage:          a.Stage,
+		State:          a.State,
+		Directive:      a.Directive,
+		Kind:           a.Kind,
+		Artifact:       artifactDocument(a.Artifact),
+		RestoreRelease: a.RestoreRelease,
 	}
 }

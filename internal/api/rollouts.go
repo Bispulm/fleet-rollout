@@ -225,5 +225,16 @@ func rolloutDocument(r store.Rollout) apiv1.Rollout {
 		FinishedAt:   r.FinishedAt,
 		Stages:       stages,
 		Exclusions:   r.Exclusions,
+		Rollback:     rollbackDocument(r.Rollback),
+	}
+}
+
+func rollbackDocument(p *store.RollbackProgress) *apiv1.RollbackProgress {
+	if p == nil {
+		return nil
+	}
+	return &apiv1.RollbackProgress{
+		Attempt: p.Attempt, DeadlineAt: p.DeadlineAt, Needed: p.Needed, Restored: p.Restored, Failed: p.Failed,
+		InFlight: p.InFlight, Unresolved: p.Unresolved, ForwardInFlight: p.ForwardInFlight,
 	}
 }

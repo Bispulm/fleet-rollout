@@ -68,6 +68,7 @@ func (s *Server) registerAdminRoutes() {
 	s.mux.Handle("POST /v1/rollouts/{id}/pause", s.admin(s.handleTransition(s.store.PauseRollout)))
 	s.mux.Handle("POST /v1/rollouts/{id}/resume", s.admin(s.handleTransition(s.store.ResumeRollout)))
 	s.mux.Handle("POST /v1/rollouts/{id}/abort", s.admin(s.handleTransition(s.store.AbortRollout)))
+	s.mux.Handle("POST /v1/rollouts/{id}/rollback", s.admin(s.handleTransition(s.store.RollbackRollout)))
 	s.mux.Handle("POST /v1/device/poll", s.device(s.handleDevicePoll))
 	s.mux.Handle("POST /v1/device/reports", s.device(s.handleDeviceReport))
 	s.mux.Handle("GET /v1/device/artifacts/{id}/manifest", s.device(s.handleDeviceManifest))
