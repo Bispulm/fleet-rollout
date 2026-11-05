@@ -1,7 +1,6 @@
 # ADR 0004: Transactional transitions and a fenced engine lease
 
-Status: Accepted. Transitions are implemented. The lease is specified, and will be built with the
-engine.
+Status: Accepted
 
 ## Context
 
@@ -26,16 +25,19 @@ anything invalid. Callers that act on a value they read should pass it.
 Leadership is a lease row in Postgres rather than an advisory lock:
 
 ```sql
-UPDATE engine_lease
-SET holder = $me, generation = generation + 1, expires_at = now() + $ttl
-WHERE expires_at < now();
+INSERT INTO engine_lease AS l (name, holder, generation, expires_at)
+VALUES ($name, $me, 1, clock_timestamp() + $ttl)
+ON CONFLICT (name) DO UPDATE
+    SET holder = EXCLUDED.holder, generation = l.generation + 1, expires_at = EXCLUDED.expires_at
+    WHERE l.expires_at <= clock_timestamp()
+RETURNING generation;
 ```
 
 Every engine transaction begins with this check, and aborts unless it matches its own generation:
 
 ```sql
 SELECT generation FROM engine_lease
-WHERE holder = $me AND generation = $mine AND expires_at > now()
+WHERE name = $name AND holder = $me AND generation = $mine AND expires_at > clock_timestamp()
 FOR SHARE;
 ```
 
@@ -44,7 +46,9 @@ transactions to finish. Any transaction that starts after takeover fails the che
 process was paused. Only Postgres's clock is used, so clock skew between engine instances doesn't
 matter.
 
-An engine that loses the lease, or can't renew it before expiry, stops work and tries to reacquire.
+An engine that loses the lease, or can't renew it, stops work and tries to reacquire. That includes a
+network error, since it can no longer be sure that it leads. An expired lease can't be renewed, even if
+nobody took it, because the holder can't know what happened in the meantime.
 
 Alternatives considered:
 
