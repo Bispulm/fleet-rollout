@@ -25,7 +25,8 @@ type AdvanceResult struct {
 // ListActiveRollouts returns the rollouts the engine must evaluate. Paused rollouts
 // are included, because safety checks keep running during a pause.
 func (s *Store) ListActiveRollouts(ctx context.Context) ([]string, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id FROM rollouts WHERE state IN ('running', 'soaking', 'paused') ORDER BY started_at, id`)
+	rows, err := s.pool.Query(ctx, `
+		SELECT id FROM rollouts WHERE state IN ('running', 'soaking', 'paused', 'rolling_back') ORDER BY started_at, id`)
 	if err != nil {
 		return nil, fmt.Errorf("query active rollouts: %w", err)
 	}
@@ -53,7 +54,7 @@ func (s *Store) AdvanceRollout(ctx context.Context, id string, fence Fence) (Adv
 			return err
 		}
 		switch current.state {
-		case rollout.StateRunning, rollout.StateSoaking, rollout.StatePaused:
+		case rollout.StateRunning, rollout.StateSoaking, rollout.StatePaused, rollout.StateRollingBack:
 		default:
 			return nil // Another instance or an operator finished it first.
 		}
@@ -62,6 +63,21 @@ func (s *Store) AdvanceRollout(ctx context.Context, id string, fence Fence) (Adv
 		r, err := readRollout(ctx, tx, id, now)
 		if err != nil {
 			return err
+		}
+		record := func(revision int64, from rollout.State, res AdvanceResult) error {
+			return appendTransition(ctx, tx, transitionRecord{
+				rolloutID: id, revision: revision, from: from, to: res.To, event: res.Event,
+				actor: engineActor, reason: res.Detail, occurredAt: now, engineGeneration: &fence.Generation,
+			})
+		}
+		if r.State == rollout.StateRollingBack {
+			res, changed, err := advanceRollback(ctx, tx, r, now)
+			if err != nil || !changed {
+				return err
+			}
+			result = res
+			result.Changed, result.From, result.Stage = true, r.State, derefStage(r.CurrentStage)
+			return record(r.Revision+1, r.State, result)
 		}
 		verdict := r.Policy.Evaluate(r.evaluation(now))
 		switch verdict.Action {
@@ -82,17 +98,22 @@ func (s *Store) AdvanceRollout(ctx context.Context, id string, fence Fence) (Adv
 		result.Changed = true
 		result.From = r.State
 		result.Stage = *r.CurrentStage
-		return appendTransition(ctx, tx, transitionRecord{
-			rolloutID:        id,
-			revision:         r.Revision + 1,
-			from:             r.State,
-			to:               result.To,
-			event:            result.Event,
-			actor:            engineActor,
-			reason:           result.Detail,
-			occurredAt:       now,
-			engineGeneration: &fence.Generation,
-		})
+		if err := record(r.Revision+1, r.State, result); err != nil {
+			return err
+		}
+		if verdict.Action != rollout.ActionHalt || r.Policy.Safety.OnBreach != rollout.OnBreachRollback {
+			return nil
+		}
+		// The policy says to roll back, so the halt and the rollback land together.
+		if err := beginRollback(ctx, tx, id, r.Policy, r.CurrentStage, now); err != nil {
+			return err
+		}
+		rollingBack := AdvanceResult{Event: rollout.EventRollback, To: rollout.StateRollingBack, Detail: "the policy rolls back on a breach"}
+		if err := record(r.Revision+2, result.To, rollingBack); err != nil {
+			return err
+		}
+		result.To = rollout.StateRollingBack
+		return nil
 	})
 	if err != nil {
 		return AdvanceResult{}, err
@@ -225,4 +246,11 @@ func halt(ctx context.Context, tx pgx.Tx, r Rollout, verdict rollout.Verdict, no
 		return AdvanceResult{}, fmt.Errorf("halt rollout: %w", err)
 	}
 	return AdvanceResult{Event: rollout.EventBreach, To: to, Detail: string(verdict.Reason) + ": " + verdict.Detail}, nil
+}
+
+func derefStage(stage *int) int {
+	if stage == nil {
+		return 0
+	}
+	return *stage
 }

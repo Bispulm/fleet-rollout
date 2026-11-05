@@ -18,6 +18,8 @@ const (
 	maxPolicyDuration = 30 * 24 * time.Hour
 	minStaleAfter     = time.Second
 	maxExcludeDevices = 10000
+	// minRollbackDeadline gives devices at least a few polls to hear about a rollback.
+	minRollbackDeadline = time.Minute
 )
 
 // Defaults used when a spec leaves a field out. Normalize copies them into the
@@ -29,6 +31,7 @@ const (
 	defaultRequiredCoverageBPS = 9000
 	defaultMaxUnknownBPS       = 500
 	defaultStaleAfter          = 15 * time.Minute
+	defaultRollbackDeadline    = time.Hour
 )
 
 // OnBreach is what the engine does when a safety threshold is crossed.
@@ -91,6 +94,8 @@ type SafetySpec struct {
 	MaxUnknownBPS        *int      `json:"max_unknown_bps,omitempty"`
 	StaleAfter           *Duration `json:"stale_after,omitempty"`
 	OnBreach             OnBreach  `json:"on_breach,omitempty"`
+	// RollbackDeadline is how long a rollback may take before it's marked incomplete.
+	RollbackDeadline *Duration `json:"rollback_deadline,omitempty"`
 }
 
 // Policy is the fully resolved, immutable policy stored with a rollout. Its JSON
@@ -118,6 +123,7 @@ type Safety struct {
 	MaxUnknownBPS        int      `json:"max_unknown_bps"`
 	StaleAfter           Duration `json:"stale_after"`
 	OnBreach             OnBreach `json:"on_breach"`
+	RollbackDeadline     Duration `json:"rollback_deadline"`
 }
 
 // Violation is one reason a policy can't be accepted.
@@ -236,13 +242,16 @@ func (s SafetySpec) resolve(problems *violations) Safety {
 	out.OnBreach = OnBreachHalt
 	if s.OnBreach != "" {
 		out.OnBreach = s.OnBreach
-		switch out.OnBreach {
-		case OnBreachHalt:
-		case OnBreachRollback:
-			// Accepting this and then only halting would mislead the operator.
-			problems.addf("safety.on_breach", "%q isn't available yet; use %q", OnBreachRollback, OnBreachHalt)
-		default:
-			problems.addf("safety.on_breach", "must be %q, got %q", OnBreachHalt, out.OnBreach)
+		if out.OnBreach != OnBreachHalt && out.OnBreach != OnBreachRollback {
+			problems.addf("safety.on_breach", "must be %q or %q, got %q", OnBreachHalt, OnBreachRollback, out.OnBreach)
+		}
+	}
+
+	out.RollbackDeadline = Duration(defaultRollbackDeadline)
+	if s.RollbackDeadline != nil {
+		out.RollbackDeadline = *s.RollbackDeadline
+		if d := out.RollbackDeadline.Std(); d < minRollbackDeadline || d > maxPolicyDuration {
+			problems.addf("safety.rollback_deadline", "must be between %s and %s, got %s", minRollbackDeadline, maxPolicyDuration, d)
 		}
 	}
 	return out

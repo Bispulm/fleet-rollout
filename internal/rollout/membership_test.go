@@ -130,3 +130,25 @@ func TestFreezeRejectsWhenExclusionsMakeSampleSizeImpossible(t *testing.T) {
 		t.Fatal("Freeze accepted a stage that can't reach its minimum")
 	}
 }
+
+func TestMembersRecordTheReleaseTheyRanBefore(t *testing.T) {
+	p, err := validSpec().Normalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidates := []Candidate{
+		{ID: "a", Platform: "linux/arm64", Status: DeviceActive, InstalledRelease: 3},
+		{ID: "b", Platform: "linux/arm64", Status: DeviceActive, InstalledRelease: 7},
+	}
+	m, err := p.Freeze("11111111-1111-4111-8111-111111111111", ArtifactTarget{Platform: "linux/arm64", Release: 9}, candidates)
+	if err != nil {
+		t.Fatalf("Freeze: %v", err)
+	}
+	prior := map[string]int64{}
+	for _, member := range m.Members {
+		prior[member.DeviceID] = member.PriorRelease
+	}
+	if prior["a"] != 3 || prior["b"] != 7 {
+		t.Fatalf("prior releases = %v, want each device's installed release", prior)
+	}
+}

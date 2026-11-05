@@ -51,6 +51,9 @@ func TestNormalizeFillsDefaultsExplicitly(t *testing.T) {
 	if got := p.Safety.OnBreach; got != OnBreachHalt {
 		t.Errorf("OnBreach = %q, want halt", got)
 	}
+	if got := p.Safety.RollbackDeadline.Std(); got != time.Hour {
+		t.Errorf("RollbackDeadline = %v, want 1h", got)
+	}
 	for i, s := range p.Stages {
 		if s.Soak.Std() != 10*time.Minute || s.Deadline.Std() != time.Hour || s.MinObservations != 1 {
 			t.Errorf("stage %d defaults = %+v", i, s)
@@ -118,7 +121,10 @@ func TestNormalizeRejectsInvalidPolicies(t *testing.T) {
 		{"unknown limit above 100%", "safety.max_unknown_bps", func(s *PolicySpec) { s.Safety.MaxUnknownBPS = ptr(10001) }},
 		{"stale window too short", "safety.stale_after", func(s *PolicySpec) { s.Safety.StaleAfter = ptr(Duration(time.Millisecond)) }},
 		{"unknown breach action", "safety.on_breach", func(s *PolicySpec) { s.Safety.OnBreach = "panic" }},
-		{"rollback on breach, which doesn't exist yet", "safety.on_breach", func(s *PolicySpec) { s.Safety.OnBreach = OnBreachRollback }},
+		{"rollback deadline too short", "safety.rollback_deadline", func(s *PolicySpec) { s.Safety.RollbackDeadline = ptr(Duration(time.Second)) }},
+		{"rollback deadline too long", "safety.rollback_deadline", func(s *PolicySpec) {
+			s.Safety.RollbackDeadline = ptr(Duration(31 * 24 * time.Hour))
+		}},
 		{"malformed selector key", "selector", func(s *PolicySpec) { s.Selector = map[string]string{"bad key": "x"} }},
 		{"empty selector value", "selector", func(s *PolicySpec) { s.Selector = map[string]string{"site": ""} }},
 		{"malformed excluded device", "exclude_devices", func(s *PolicySpec) { s.ExcludeDevices = []string{"bad id"} }},
@@ -293,5 +299,18 @@ func TestDurationJSON(t *testing.T) {
 		if err := json.Unmarshal([]byte(bad), &got); err == nil && bad != "null" {
 			t.Errorf("decoding %s succeeded", bad)
 		}
+	}
+}
+
+func TestRollbackOnBreachIsAccepted(t *testing.T) {
+	spec := validSpec()
+	spec.Safety.OnBreach = OnBreachRollback
+	spec.Safety.RollbackDeadline = ptr(Duration(20 * time.Minute))
+	p, err := spec.Normalize()
+	if err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if p.Safety.OnBreach != OnBreachRollback || p.Safety.RollbackDeadline.Std() != 20*time.Minute {
+		t.Fatalf("safety = %+v", p.Safety)
 	}
 }

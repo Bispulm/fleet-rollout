@@ -24,6 +24,8 @@ type Assignment struct {
 	IssuedAt   time.Time
 	Directive  rollout.Directive
 	Artifact   Artifact
+	// RestoreRelease is the release a rollback assignment restores. It's nil for a forward one.
+	RestoreRelease *int64
 }
 
 // AuthenticateDevice finds the device a credential belongs to. Decommissioned
@@ -61,6 +63,10 @@ func (s *Store) PollAssignment(ctx context.Context, device Device) (*Assignment,
 		if err != nil || out != nil {
 			return err
 		}
+		// A device that ran the bad release rolls back, even if it's been excluded since.
+		if out, err = issueRollback(ctx, tx, device, now); err != nil || out != nil {
+			return err
+		}
 		if device.Status != rollout.DeviceActive {
 			return nil
 		}
@@ -88,10 +94,12 @@ func openAssignment(ctx context.Context, tx pgx.Tx, deviceID string) (*Assignmen
 	var rolloutState rollout.State
 	var artifactID string
 	err := tx.QueryRow(ctx, `
-		SELECT a.id, a.rollout_id, a.generation, a.kind, a.stage_ordinal, a.state, a.issued_at, r.state, r.artifact_id
+		SELECT a.id, a.rollout_id, a.generation, a.kind, a.stage_ordinal, a.state, a.issued_at, a.restore_release,
+		       r.state, r.artifact_id
 		FROM assignments a JOIN rollouts r ON r.id = a.rollout_id
 		WHERE a.device_id = $1 AND a.finished_at IS NULL`, deviceID).Scan(
-		&a.ID, &a.RolloutID, &a.Generation, &a.Kind, &a.Stage, &a.State, &a.IssuedAt, &rolloutState, &artifactID)
+		&a.ID, &a.RolloutID, &a.Generation, &a.Kind, &a.Stage, &a.State, &a.IssuedAt, &a.RestoreRelease,
+		&rolloutState, &artifactID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
