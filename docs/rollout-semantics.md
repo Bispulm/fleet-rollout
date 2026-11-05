@@ -170,7 +170,7 @@ part of the rollout's record.
 
 ## States and transitions
 
-**Status: Implemented,** except for the rollback events, which the table allows but nothing issues yet.
+**Status: Implemented.**
 
 | From | Event | To |
 |---|---|---|
@@ -365,8 +365,7 @@ stages big enough that one interrupted install doesn't decide them. The simulato
 
 ## Rollback
 
-**Status: Specified,** in detail in [ADR 0011](adr/0011-rollback.md). Until it's built, a policy with
-`on_breach: rollback` is rejected at creation rather than accepted and silently treated as a halt.
+**Status: Implemented,** as [ADR 0011](adr/0011-rollback.md) describes.
 
 An authorized rollback tells each exposed device to restore the healthy version it recorded before
 this rollout. It doesn't disable downgrade protection in general: the authorization is scoped to one
