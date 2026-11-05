@@ -1402,6 +1402,54 @@ func TestACrashDuringDownloadDiscardsAnythingUnverified(t *testing.T) {
 	}
 }
 
+func TestADownloadShorterThanRecordedStartsOver(t *testing.T) {
+	f := newFixture(t)
+	f.runUntil("two chunks kept", func() bool {
+		work := f.agent.Checkpoint().Work
+		return work != nil && work.VerifiedChunks >= 2
+	})
+	// Power was lost before the new file's directory entry reached the disk, so the file is
+	// gone, though the checkpoint records what was in it.
+	if err := f.partials.Truncate("artifact-1", 0); err != nil {
+		t.Fatal(err)
+	}
+	f.restart()
+	if work := f.agent.Checkpoint().Work; work == nil || work.VerifiedChunks != 0 {
+		t.Fatalf("work = %+v, want the download started over", work)
+	}
+	f.runToIdle()
+	if got := f.server.last(); got.State != rollout.AssignmentSucceeded {
+		t.Fatalf("last report = %+v", got)
+	}
+}
+
+func TestAFailedWriteLeavesNothingBehindToBreakTheDownload(t *testing.T) {
+	f := newFixture(t)
+	f.runUntil("a chunk kept", func() bool {
+		work := f.agent.Checkpoint().Work
+		return work != nil && work.VerifiedChunks >= 1
+	})
+	f.partials.FailNextAppend()
+	failed := false
+	for range 50 {
+		wait, err := f.agent.Step(f.ctx)
+		if err != nil {
+			failed = true
+		}
+		f.clock.now = f.clock.now.Add(wait)
+		if failed && err == nil {
+			break
+		}
+	}
+	if !failed {
+		t.Fatal("the failed write wasn't reported as an error")
+	}
+	f.runToIdle()
+	if got := f.server.last(); got.State != rollout.AssignmentSucceeded {
+		t.Fatalf("last report = %+v, want the download to recover from a failed write", got)
+	}
+}
+
 func TestStoredBytesThatGoBadAreCaughtBeforeInstalling(t *testing.T) {
 	f := newFixture(t)
 	f.runUntil("downloaded", func() bool {

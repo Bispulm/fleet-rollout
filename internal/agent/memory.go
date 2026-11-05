@@ -66,6 +66,15 @@ func (m *MemoryCheckpoints) FailSaves(err error) {
 type MemoryPartials struct {
 	mu   sync.Mutex
 	data map[string][]byte
+	// failAppend makes the next append write half its data and fail, as a full disk might.
+	failAppend bool
+}
+
+// FailNextAppend makes the next append write only half its data, then fail.
+func (m *MemoryPartials) FailNextAppend() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.failAppend = true
 }
 
 // NewMemoryPartials returns an empty store.
@@ -77,7 +86,7 @@ func (m *MemoryPartials) Truncate(id string, size int64) error {
 	defer m.mu.Unlock()
 	current := m.data[id]
 	if int64(len(current)) < size {
-		return fmt.Errorf("partial %s has %d bytes, can't truncate to %d", id, len(current), size)
+		return fmt.Errorf("partial %s has %d bytes, can't truncate to %d: %w", id, len(current), size, ErrPartialShort)
 	}
 	m.data[id] = current[:size:size]
 	return nil
@@ -87,6 +96,11 @@ func (m *MemoryPartials) Truncate(id string, size int64) error {
 func (m *MemoryPartials) Append(id string, data []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.failAppend {
+		m.failAppend = false
+		m.data[id] = append(m.data[id], data[:len(data)/2]...)
+		return errors.New("no space left on device")
+	}
 	m.data[id] = append(m.data[id], data...)
 	return nil
 }

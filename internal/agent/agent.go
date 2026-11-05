@@ -76,8 +76,13 @@ type Checkpoints interface {
 }
 
 // Partials stores artifacts while they download. Append must be durable when it returns.
+// ErrPartialShort reports a partial download shorter than asked for, as one can be when
+// power is lost before a new file's directory entry is on disk.
+var ErrPartialShort = errors.New("partial download is shorter than expected")
+
 type Partials interface {
-	// Truncate discards everything past size, creating the partial if needed.
+	// Truncate discards everything past size, creating the partial if needed. It never
+	// extends a partial, and returns ErrPartialShort if it's shorter than size.
 	Truncate(artifactID string, size int64) error
 	Append(artifactID string, data []byte) error
 	Open(artifactID string) (io.ReadCloser, error)
@@ -239,8 +244,10 @@ type Agent struct {
 
 	// manifest is the verified form of the current work's envelope.
 	manifest *signing.Manifest
-	backoff  retry.Backoff
-	failures int
+	// partialDirty means a failed write may have left bytes past what's verified.
+	partialDirty bool
+	backoff      retry.Backoff
+	failures     int
 
 	nextPoll     time.Time
 	nextFlush    time.Time
@@ -324,7 +331,17 @@ func (a *Agent) recover() error {
 	}
 	a.manifest = &manifest
 	// Keep exactly what's verified, and nothing a crash may have left after it.
-	return a.truncateToVerified(manifest, work.VerifiedChunks)
+	err = a.truncateToVerified(manifest, work.VerifiedChunks)
+	if !errors.Is(err, ErrPartialShort) {
+		return err
+	}
+	// Some of what was verified is gone, and nothing says which, so start again.
+	next := a.cp.clone()
+	next.Work.VerifiedChunks = 0
+	if err := a.commit(next); err != nil {
+		return err
+	}
+	return a.truncateToVerified(manifest, 0)
 }
 
 func (a *Agent) truncateToVerified(m signing.Manifest, chunks int) error {
@@ -703,7 +720,17 @@ func (a *Agent) stepDownload(ctx context.Context, now time.Time) (time.Duration,
 // the two leaves bytes that the restart will discard.
 func (a *Agent) keepChunk(data []byte) error {
 	work := a.cp.Work
+	if a.partialDirty {
+		if err := a.truncateToVerified(*a.manifest, work.VerifiedChunks); err != nil {
+			return err
+		}
+		a.partialDirty = false
+	}
 	if err := a.deps.Partials.Append(work.Artifact.ID, data); err != nil {
+		// Part of the chunk may have been written, and the next one mustn't land after it.
+		if truncErr := a.truncateToVerified(*a.manifest, work.VerifiedChunks); truncErr != nil {
+			a.partialDirty = true
+		}
 		return fmt.Errorf("write partial download: %w", err)
 	}
 	a.failures = 0

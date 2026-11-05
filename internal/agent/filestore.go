@@ -139,12 +139,16 @@ func (f *FilePartials) Truncate(id string, size int64) error {
 		return fmt.Errorf("stat partial download: %w", err)
 	}
 	if info.Size() < size {
-		return fmt.Errorf("partial download has %d bytes, can't truncate to %d", info.Size(), size)
+		return fmt.Errorf("partial download has %d bytes, can't truncate to %d: %w", info.Size(), size, ErrPartialShort)
 	}
 	if err := file.Truncate(size); err != nil {
 		return fmt.Errorf("truncate partial download: %w", err)
 	}
-	return file.Sync()
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("sync partial download: %w", err)
+	}
+	// A new file's directory entry has to be durable too, or a power cut can lose it.
+	return syncDir(f.dir)
 }
 
 // Append implements Partials. The data is synced before it returns.

@@ -3,6 +3,7 @@ package agent_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -110,8 +111,8 @@ func TestFilePartials(t *testing.T) {
 	if got := readAll(t, partials, id); got != "first " {
 		t.Fatalf("after truncating, content = %q", got)
 	}
-	if err := partials.Truncate(id, 100); err == nil {
-		t.Fatal("truncated to beyond the end, which would invent bytes")
+	if err := partials.Truncate(id, 100); !errors.Is(err, agent.ErrPartialShort) {
+		t.Fatalf("truncating beyond the end, which would invent bytes: error = %v, want ErrPartialShort", err)
 	}
 
 	const other = "22222222-2222-4222-8222-222222222222"
