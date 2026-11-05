@@ -318,3 +318,22 @@ func TestDetailStatesTheNumbers(t *testing.T) {
 		}
 	}
 }
+
+func TestDeadlineDetailNamesUnknownDevicesInEarlierStages(t *testing.T) {
+	policy := evalPolicy(t, func(s *PolicySpec) { s.Stages[1].MinObservations = ptr(1) })
+	e := soaking(Outcomes{Cohort: 100, Succeeded: 100}, time.Minute)
+	e.CurrentStage = 2
+	e.DeadlineAt = evalNow
+	e.Stages = []StageOutcomes{
+		{Ordinal: 1, Outcomes: Outcomes{Cohort: 100, Succeeded: 80, Unknown: 20}},
+		{Ordinal: 2, Outcomes: Outcomes{Cohort: 100, Succeeded: 100}},
+	}
+	v := policy.Evaluate(e)
+	if v.Action != ActionHalt || v.Reason != HaltDeadline {
+		t.Fatalf("verdict = %+v", v)
+	}
+	// The current stage is clean, so the real cause has to be visible to the operator.
+	if !strings.Contains(v.Detail, "20") || !strings.Contains(v.Detail, "200") {
+		t.Fatalf("detail %q should state the 20 unknown of 200 exposed", v.Detail)
+	}
+}

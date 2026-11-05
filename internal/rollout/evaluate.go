@@ -101,8 +101,8 @@ func (p Policy) Evaluate(e Evaluation) Verdict {
 		return Verdict{
 			Action: ActionHalt,
 			Reason: HaltDeadline,
-			Detail: fmt.Sprintf("stage %d reached its deadline with %d of %d outcomes and %d unknown",
-				e.CurrentStage, current.Observed(), current.Cohort, current.Unknown),
+			Detail: fmt.Sprintf("stage %d reached its deadline with %d of %d outcomes and %d unknown; %d of %d exposed devices are unknown overall",
+				e.CurrentStage, current.Observed(), current.Cohort, current.Unknown, everyone.Unknown, everyone.Cohort),
 		}
 	}
 
