@@ -4,6 +4,8 @@
 # TLS ends at the cluster's ingress or service mesh, not in rolloutd.
 - name: ROLLOUTD_ALLOW_NON_LOOPBACK
   value: "true"
+- name: ROLLOUTD_METRICS_ADDR
+  value: "0.0.0.0:{{ .Values.rolloutd.metricsPort }}"
 - name: ROLLOUTD_DATABASE_URL
   valueFrom:
     secretKeyRef:
@@ -63,6 +65,9 @@ spec:
     - name: http
       port: {{ .Values.rolloutd.service.port }}
       targetPort: http
+    - name: metrics
+      port: {{ .Values.rolloutd.metricsPort }}
+      targetPort: metrics
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -88,6 +93,9 @@ spec:
         app.kubernetes.io/component: rolloutd
       annotations:
         checksum/trust: {{ .Values.trustKeys | sha256sum }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.rolloutd.metricsPort | quote }}
+        prometheus.io/path: /metrics
     spec:
       securityContext:
         runAsNonRoot: true
@@ -117,6 +125,8 @@ spec:
           ports:
             - name: http
               containerPort: {{ .Values.rolloutd.service.port }}
+            - name: metrics
+              containerPort: {{ .Values.rolloutd.metricsPort }}
           livenessProbe:
             httpGet:
               path: /healthz
