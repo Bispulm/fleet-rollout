@@ -62,12 +62,19 @@ func (s *Server) registerAdminRoutes() {
 	s.mux.Handle("POST /v1/rollouts/{id}/pause", s.admin(s.handleTransition(s.store.PauseRollout)))
 	s.mux.Handle("POST /v1/rollouts/{id}/resume", s.admin(s.handleTransition(s.store.ResumeRollout)))
 	s.mux.Handle("POST /v1/rollouts/{id}/abort", s.admin(s.handleTransition(s.store.AbortRollout)))
+	s.mux.Handle("POST /v1/device/poll", s.device(s.handleDevicePoll))
+	s.mux.Handle("POST /v1/device/reports", s.device(s.handleDeviceReport))
 }
 
-// decodeJSON reads exactly one JSON document, rejecting unknown fields so that a
-// misspelled safety setting fails loudly rather than silently using a default.
+// decodeJSON reads an admin request body.
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes))
+	return decodeJSONLimit(w, r, dst, maxBodyBytes)
+}
+
+// decodeJSONLimit reads exactly one JSON document, rejecting unknown fields so that a
+// misspelled safety setting fails loudly rather than silently using a default.
+func decodeJSONLimit(w http.ResponseWriter, r *http.Request, dst any, limit int64) error {
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(dst); err != nil {
 		var tooLarge *http.MaxBytesError

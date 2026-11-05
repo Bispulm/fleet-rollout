@@ -83,6 +83,10 @@ func (s *Server) writeError(w http.ResponseWriter, r *http.Request, err error) {
 		writeProblemDocument(w, apiv1.Problem{Status: http.StatusConflict, Detail: err.Error(), Code: apiv1.CodeRevisionMismatch})
 	case errors.As(err, &conflict):
 		writeProblemDocument(w, apiv1.Problem{Status: http.StatusConflict, Detail: err.Error(), Code: apiv1.CodeConflict})
+	case errors.Is(err, store.ErrReportConflict):
+		writeProblemDocument(w, apiv1.Problem{Status: http.StatusConflict, Detail: err.Error(), Code: apiv1.CodeReportConflict})
+	case errors.Is(err, store.ErrReportMismatch):
+		writeProblemDocument(w, apiv1.Problem{Status: http.StatusConflict, Detail: err.Error(), Code: apiv1.CodeReportMismatch})
 	case errors.Is(err, store.ErrMembershipNotFrozen):
 		writeProblemDocument(w, apiv1.Problem{Status: http.StatusConflict, Detail: err.Error(), Code: apiv1.CodeMembershipNotReady})
 	case errors.Is(err, store.ErrNotFound):
