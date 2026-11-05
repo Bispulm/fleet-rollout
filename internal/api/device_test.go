@@ -187,7 +187,8 @@ func TestDuplicateAndConflictingReports(t *testing.T) {
 	}
 	var repeat apiv1.ReportResponse
 	decode(t, raw, &repeat)
-	if !repeat.Duplicate || repeat.Applied {
+	// A device that lost the first response learns from the repeat that it was applied.
+	if !repeat.Duplicate || !repeat.Applied {
 		t.Fatalf("repeat = %+v", repeat)
 	}
 

@@ -276,7 +276,7 @@ func TestAbortSupersedesUnstartedWorkAndLeavesInFlightWork(t *testing.T) {
 		t.Fatalf("superseded device got %+v", got)
 	}
 	result := mustReport(t, ctx, s, waiting, abandoned, 1, rollout.AssignmentInstalling)
-	if result.Applied || result.IgnoredReason != store.IgnoredAssignmentFinished {
+	if result.Applied || result.IgnoredReason != rollout.IgnoredAssignmentFinished {
 		t.Fatalf("report on a superseded assignment = %+v", result)
 	}
 

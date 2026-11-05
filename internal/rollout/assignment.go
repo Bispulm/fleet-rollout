@@ -71,6 +71,16 @@ func CanProgress(from, to AssignmentState) bool {
 	return forwardRank[to] >= forwardRank[from]
 }
 
+// Why the server recorded a report without applying it.
+const (
+	IgnoredAssignmentFinished = "assignment_finished"
+	IgnoredOutOfOrder         = "out_of_order"
+	IgnoredInvalidProgression = "invalid_progression"
+	// IgnoredOnHold refuses to let a device start installing while its assignment is on
+	// hold. The assignment stays open, and the device may try again once it's released.
+	IgnoredOnHold = "on_hold"
+)
+
 // Directive tells a device what to do with its open assignment.
 type Directive string
 

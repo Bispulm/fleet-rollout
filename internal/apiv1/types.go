@@ -241,7 +241,10 @@ type ReportRequest struct {
 }
 
 // ReportResponse says what became of a report. All of these are final, and none of
-// them should be retried.
+// them should be retried. Duplicate means the server already had this exact report, and
+// Applied and IgnoredReason then describe what became of the first copy. IgnoredReason is
+// one of the rollout.Ignored values. A report of installing that's ignored as on_hold
+// means the device must not start installing yet.
 type ReportResponse struct {
 	Applied       bool   `json:"applied"`
 	Duplicate     bool   `json:"duplicate,omitempty"`

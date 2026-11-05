@@ -148,7 +148,8 @@ pause, so a pause can't make a stage time out by itself. Safety checks keep runn
 so a breach moves the rollout from `paused` to `halted`.
 
 Pausing prevents new forward assignments atomically, and tells devices that haven't started installing to
-hold. Devices already installing finish.
+hold. Devices already installing finish. A device that asks to start installing during a pause is refused,
+and that request is ordered against the pause, so once a pause has committed no new install starts.
 
 ### Late reports
 
@@ -232,7 +233,9 @@ agent holding an assignment that a poll no longer returns must abandon it, unles
 
 - A report names its rollout, assignment, generation, and a sequence number the agent persists. The
   assignment must belong to the authenticated device. Anything else is treated as not found.
-- An identical repeat of a report is acknowledged and changes nothing.
+- An identical repeat of a report is acknowledged as a duplicate and changes nothing. The response says
+  what became of the original, so a device that lost the first response learns the same thing from the
+  retry.
 - A different report with an already-used sequence is rejected as a conflict.
 - Every new report is recorded in the append-only event log, whether or not it's applied, with the reason
   it was ignored if it wasn't.
@@ -241,6 +244,12 @@ agent holding an assignment that a poll no longer returns must abandon it, unles
   decision, and can't count twice, since outcomes come from one row per device.
 - Progress only moves forward, and may skip steps. `succeeded` requires having reached `health_check`, so
   a device can't claim success without having checked. `failed` is allowed from any open state.
+- A report that moves an assignment into an in-flight state from one that isn't is a request to start
+  installing, and it's decided against the rollout as it stands. It's refused as `on_hold` while the
+  assignment is held, and the assignment stays open. Once a halt, abort, or completion has superseded the
+  assignment, it's ignored as finished. Those transitions update the assignment, so its row lock orders
+  them against the report. A pause doesn't, so this one report also takes a shared lock on the rollout
+  first. Reports from devices already in flight never wait on it.
 - Stage counts are derived from assignments at evaluation time. There are no counters that could drift
   from them, and nothing in memory to lose on restart.
 
