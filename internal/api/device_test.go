@@ -293,23 +293,40 @@ func TestDeviceRequestsBeyondTheLimitAreShedWithRetryAfter(t *testing.T) {
 
 	// One device holds the only slot, with a request whose body never finishes arriving. It's
 	// written by hand, because an HTTP client buffers a streamed request and wouldn't send it.
-	conn, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", strings.TrimPrefix(h.base, "http://"))
-	if err != nil {
-		t.Fatalf("dial: %v", err)
+	var conn net.Conn
+	hold := func() {
+		t.Helper()
+		var err error
+		conn, err = (&net.Dialer{}).DialContext(t.Context(), "tcp", strings.TrimPrefix(h.base, "http://"))
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		if _, err := fmt.Fprintf(conn, "POST /v1/device/reports HTTP/1.1\r\nHost: test\r\nAuthorization: Bearer %s\r\n"+
+			"Content-Type: application/json\r\nContent-Length: 1000\r\n\r\n{\"sequence\":", devices[0].Token); err != nil {
+			t.Fatalf("write held request: %v", err)
+		}
 	}
+	// held reports whether the held request still has the slot. If a poll got there first,
+	// the held request was the one turned away, and the server has answered it.
+	held := func() bool {
+		_ = conn.SetReadDeadline(time.Now().Add(time.Millisecond))
+		n, _ := conn.Read(make([]byte, 1))
+		return n == 0
+	}
+	hold()
 	// This runs before the server's own cleanup, so a failure here can't leave the server
 	// waiting forever on the held request.
 	t.Cleanup(func() { _ = conn.Close() })
-	if _, err := fmt.Fprintf(conn, "POST /v1/device/reports HTTP/1.1\r\nHost: test\r\nAuthorization: Bearer %s\r\n"+
-		"Content-Type: application/json\r\nContent-Length: 1000\r\n\r\n{\"sequence\":", devices[0].Token); err != nil {
-		t.Fatalf("write held request: %v", err)
-	}
 	// A broken limiter would make a poll wait for the slot, so a timeout turns that into a failure.
 	poller := &http.Client{Timeout: 2 * time.Second}
 
 	var shed http.Header
 	deadline := time.Now().Add(5 * time.Second)
 	for shed == nil && time.Now().Before(deadline) {
+		if !held() {
+			_ = conn.Close()
+			hold()
+		}
 		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, h.base+"/v1/device/poll", http.NoBody)
 		if err != nil {
 			t.Fatalf("build request: %v", err)
