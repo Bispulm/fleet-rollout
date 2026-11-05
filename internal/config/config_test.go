@@ -125,3 +125,65 @@ func TestLoadReportsEveryProblemAtOnce(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadEngineAndDeviceTimingDefaults(t *testing.T) {
+	cfg, err := Load(env(nil))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.EngineEnabled {
+		t.Error("the engine should run by default")
+	}
+	if cfg.EngineInterval != 5*time.Second || cfg.EngineLeaseTTL != 30*time.Second {
+		t.Errorf("engine timing = %v, %v", cfg.EngineInterval, cfg.EngineLeaseTTL)
+	}
+	if cfg.PollInterval != time.Minute || cfg.AssignmentLease != 5*time.Minute {
+		t.Errorf("device timing = %v, %v", cfg.PollInterval, cfg.AssignmentLease)
+	}
+}
+
+func TestLoadEngineCanBeDisabled(t *testing.T) {
+	cfg, err := Load(env(map[string]string{"ROLLOUTD_ENGINE_ENABLED": "false"}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.EngineEnabled {
+		t.Fatal("the engine is still enabled")
+	}
+}
+
+func TestLoadRejectsUnsafeTiming(t *testing.T) {
+	cases := []struct {
+		name string
+		vars map[string]string
+		want string
+	}{
+		{"unparseable interval", map[string]string{"ROLLOUTD_ENGINE_INTERVAL": "soon"}, "ROLLOUTD_ENGINE_INTERVAL"},
+		{"zero interval", map[string]string{"ROLLOUTD_ENGINE_INTERVAL": "0s"}, "ROLLOUTD_ENGINE_INTERVAL"},
+		{"unparseable TTL", map[string]string{"ROLLOUTD_ENGINE_LEASE_TTL": "soon"}, "ROLLOUTD_ENGINE_LEASE_TTL"},
+		{"TTL shorter than three intervals", map[string]string{"ROLLOUTD_ENGINE_INTERVAL": "10s", "ROLLOUTD_ENGINE_LEASE_TTL": "29s"}, "ROLLOUTD_ENGINE_LEASE_TTL"},
+		{"poll interval under a second", map[string]string{"ROLLOUTD_POLL_INTERVAL": "500ms"}, "ROLLOUTD_POLL_INTERVAL"},
+		{"lease shorter than two polls", map[string]string{"ROLLOUTD_POLL_INTERVAL": "60s", "ROLLOUTD_ASSIGNMENT_LEASE": "119s"}, "ROLLOUTD_ASSIGNMENT_LEASE"},
+		{"bad boolean", map[string]string{"ROLLOUTD_ENGINE_ENABLED": "maybe"}, "ROLLOUTD_ENGINE_ENABLED"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Load(env(tc.vars))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Load error = %v, want one naming %s", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadAcceptsTimingAtTheBoundaries(t *testing.T) {
+	_, err := Load(env(map[string]string{
+		"ROLLOUTD_ENGINE_INTERVAL":  "10s",
+		"ROLLOUTD_ENGINE_LEASE_TTL": "30s",
+		"ROLLOUTD_POLL_INTERVAL":    "1s",
+		"ROLLOUTD_ASSIGNMENT_LEASE": "2s",
+	}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+}

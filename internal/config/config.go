@@ -16,6 +16,14 @@ const (
 	defaultShutdownTimeout = 15 * time.Second
 	defaultDBMaxConns      = 16
 	minAdminTokenLength    = 16
+	defaultEngineInterval  = 5 * time.Second
+	defaultEngineLeaseTTL  = 30 * time.Second
+	defaultPollInterval    = time.Minute
+	defaultAssignmentLease = 5 * time.Minute
+	// A slow tick or two shouldn't cost the engine its lease.
+	minLeaseTTLIntervals = 3
+	// A device that misses one poll shouldn't lose its assignment's lease.
+	minLeasePollIntervals = 2
 )
 
 // Config holds the settings for the rolloutd server.
@@ -26,6 +34,12 @@ type Config struct {
 	LogLevel        slog.Level
 	ShutdownTimeout time.Duration
 	DBMaxConns      int32
+
+	EngineEnabled   bool
+	EngineInterval  time.Duration
+	EngineLeaseTTL  time.Duration
+	PollInterval    time.Duration
+	AssignmentLease time.Duration
 }
 
 // Load reads settings through getenv, which is normally os.Getenv. It reports
@@ -36,6 +50,11 @@ func Load(getenv func(string) string) (Config, error) {
 		LogLevel:        slog.LevelInfo,
 		ShutdownTimeout: defaultShutdownTimeout,
 		DBMaxConns:      defaultDBMaxConns,
+		EngineEnabled:   true,
+		EngineInterval:  defaultEngineInterval,
+		EngineLeaseTTL:  defaultEngineLeaseTTL,
+		PollInterval:    defaultPollInterval,
+		AssignmentLease: defaultAssignmentLease,
 	}
 	var problems []error
 
@@ -87,10 +106,55 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 	}
 
+	problems = append(problems, cfg.loadTiming(getenv)...)
+
 	if err := errors.Join(problems...); err != nil {
 		return Config{}, fmt.Errorf("invalid configuration:\n%w", err)
 	}
 	return cfg, nil
+}
+
+// loadTiming reads the engine and device timers, and checks them against each other.
+func (cfg *Config) loadTiming(getenv func(string) string) []error {
+	var problems []error
+	if v := getenv("ROLLOUTD_ENGINE_ENABLED"); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			problems = append(problems, fmt.Errorf("ROLLOUTD_ENGINE_ENABLED: %q is not a boolean", v))
+		}
+		cfg.EngineEnabled = enabled
+	}
+	durations := []struct {
+		name string
+		dst  *time.Duration
+	}{
+		{"ROLLOUTD_ENGINE_INTERVAL", &cfg.EngineInterval},
+		{"ROLLOUTD_ENGINE_LEASE_TTL", &cfg.EngineLeaseTTL},
+		{"ROLLOUTD_POLL_INTERVAL", &cfg.PollInterval},
+		{"ROLLOUTD_ASSIGNMENT_LEASE", &cfg.AssignmentLease},
+	}
+	for _, d := range durations {
+		v := getenv(d.name)
+		if v == "" {
+			continue
+		}
+		parsed, err := time.ParseDuration(v)
+		if err != nil || parsed <= 0 {
+			problems = append(problems, fmt.Errorf("%s: %q is not a positive duration", d.name, v))
+			continue
+		}
+		*d.dst = parsed
+	}
+	if cfg.EngineLeaseTTL < minLeaseTTLIntervals*cfg.EngineInterval {
+		problems = append(problems, fmt.Errorf("ROLLOUTD_ENGINE_LEASE_TTL must be at least %d times ROLLOUTD_ENGINE_INTERVAL", minLeaseTTLIntervals))
+	}
+	if cfg.PollInterval < time.Second {
+		problems = append(problems, errors.New("ROLLOUTD_POLL_INTERVAL must be at least 1s"))
+	}
+	if cfg.AssignmentLease < minLeasePollIntervals*cfg.PollInterval {
+		problems = append(problems, fmt.Errorf("ROLLOUTD_ASSIGNMENT_LEASE must be at least %d times ROLLOUTD_POLL_INTERVAL", minLeasePollIntervals))
+	}
+	return problems
 }
 
 // checkListenAddr refuses addresses reachable from other machines unless the
