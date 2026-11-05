@@ -45,5 +45,5 @@ Alternatives considered:
 - A poll writes `last_seen_at`. That's a write per poll, and it's the first thing to batch if polling load
   turns out to be a problem.
 - The lease only bounds exposure if agents honor it, which arrives with the agent.
-- Members offline at completion need a follow-up rollout. Since they'd be excluded from nothing, and members
-  already on the release would be, this falls out of the existing eligibility rules.
+- Members offline at completion need a follow-up rollout. The existing eligibility rules already handle this,
+  since members on the release are excluded from it, and the rest aren't.
