@@ -163,6 +163,23 @@ func (s *Store) ListDevices(ctx context.Context, fleetName, afterID string, limi
 	return devices, nil
 }
 
+// SetDeviceStatus changes a device's administrative status. It affects rollouts
+// that start afterward. Membership of a started rollout stays frozen.
+func (s *Store) SetDeviceStatus(ctx context.Context, id string, status rollout.DeviceStatus) (Device, error) {
+	rows, err := s.pool.Query(ctx, `UPDATE devices SET status = $2 WHERE id = $1 RETURNING `+deviceColumns, id, status)
+	if err != nil {
+		return Device{}, fmt.Errorf("update device: %w", err)
+	}
+	device, err := pgx.CollectExactlyOneRow(rows, scanDevice)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Device{}, notFound("device", id)
+	}
+	if err != nil {
+		return Device{}, fmt.Errorf("update device: %w", err)
+	}
+	return device, nil
+}
+
 const deviceColumns = `id, fleet_id, platform, labels, status, installed_release, last_seen_at, created_at`
 
 func scanDevice(row pgx.CollectableRow) (Device, error) {

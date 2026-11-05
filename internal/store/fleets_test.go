@@ -215,3 +215,23 @@ func TestListDevicesOnlyReturnsThatFleet(t *testing.T) {
 		t.Fatalf("missing fleet error = %v, want ErrNotFound", err)
 	}
 }
+
+func TestSetDeviceStatus(t *testing.T) {
+	s, ctx := newStore(t)
+	if _, err := s.CreateFleet(ctx, "lab-a", nil); err != nil {
+		t.Fatalf("CreateFleet: %v", err)
+	}
+	if _, err := s.RegisterDevices(ctx, "lab-a", newDevices(1)); err != nil {
+		t.Fatalf("RegisterDevices: %v", err)
+	}
+	updated, err := s.SetDeviceStatus(ctx, "sim-00000", rollout.DeviceExcluded)
+	if err != nil {
+		t.Fatalf("SetDeviceStatus: %v", err)
+	}
+	if updated.Status != rollout.DeviceExcluded {
+		t.Fatalf("status = %q", updated.Status)
+	}
+	if _, err := s.SetDeviceStatus(ctx, "missing", rollout.DeviceExcluded); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("missing device error = %v, want ErrNotFound", err)
+	}
+}
