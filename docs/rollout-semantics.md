@@ -156,7 +156,9 @@ A stage's verdict is immutable once recorded. A late report still updates the as
 stage's counters:
 
 - A late failure can trigger the rollout-wide or late-regression check. It doesn't rewrite the old
-  verdict, and the halt reason names the stage and the time.
+  verdict, and the halt reason names the stage. The stage that happened to be current ends as `stopped`
+  rather than `failed`, because its own devices did nothing wrong. An abort stops the current stage the
+  same way.
 - A late success can't undo a halt. Halts are cleared by an operator, not by more data arriving.
 
 ### Halted rollouts

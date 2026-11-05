@@ -34,6 +34,9 @@ const (
 	StageFailed  StageState = "failed"
 	// StageSkipped marks a stage that rounding left with no new devices.
 	StageSkipped StageState = "skipped"
+	// StageStopped marks a stage whose rollout stopped for a reason other than this
+	// stage's own results, such as an abort or a late failure in an earlier stage.
+	StageStopped StageState = "stopped"
 )
 
 // Stage is a stage's size and progress.

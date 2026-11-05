@@ -115,7 +115,7 @@ func runServe(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger
 		return err
 	}
 	serveErr := server.Serve(ctx, listener, cfg.ShutdownTimeout)
-	// The engine stops after the API, and before the pool closes.
+	// Both stop when ctx ends. This waits for the engine, before the pool closes.
 	stopEngine()
 	if serveErr != nil {
 		return serveErr

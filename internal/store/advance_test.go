@@ -329,8 +329,8 @@ func TestLateFailureInAPassedStageHaltsWithoutRewritingItsVerdict(t *testing.T) 
 	if after.Stages[0].State != store.StagePassed {
 		t.Fatalf("stage 1's verdict was rewritten to %q", after.Stages[0].State)
 	}
-	if after.Stages[1].State != store.StageFailed {
-		t.Fatalf("stage 2 = %q, want failed", after.Stages[1].State)
+	if after.Stages[1].State != store.StageStopped {
+		t.Fatalf("stage 2 = %q, want stopped, since it did nothing wrong", after.Stages[1].State)
 	}
 }
 
@@ -888,5 +888,67 @@ func TestCompletionCancelsWorkThatHasNotStarted(t *testing.T) {
 	got := poll(t, e.ctx, e.store, waitingDevice)
 	if got == nil || got.RolloutID != created.ID {
 		t.Fatalf("the left-behind device got %+v, want the follow-up's assignment", got)
+	}
+}
+
+func TestRolloutWideBreachDoesNotBlameTheCurrentStage(t *testing.T) {
+	e := newEngineWorld(t, 100)
+	r := e.startRollout(func(p *rollout.PolicySpec) {
+		p.Safety.MaxFailureBPS = ptr(5000)
+		p.Safety.RolloutMaxFailureBPS = ptr(100)
+		p.Stages[0].Soak = ptr(rollout.Duration(0))
+	})
+	// 2 failures of 10 is fine for the stage's 50% limit, but over the rollout's 1%.
+	e.finish(r.ID, rollout.AssignmentSucceeded, span(1, 8)...)
+	e.finish(r.ID, rollout.AssignmentFailed, 9, 10)
+	if got := e.advance(r.ID); got.Event != rollout.EventBreach {
+		t.Fatalf("result = %+v", got)
+	}
+	after := e.get(r.ID)
+	if *after.HaltReason != string(rollout.HaltRolloutBreach) || after.Stages[0].State != store.StageStopped {
+		t.Fatalf("reason = %s, stage = %s", *after.HaltReason, after.Stages[0].State)
+	}
+}
+
+func TestAbortStopsTheCurrentStage(t *testing.T) {
+	e := newEngineWorld(t, 20)
+	r := e.startRollout(nil)
+	aborted, err := e.store.AbortRollout(e.ctx, r.ID, byAdmin)
+	if err != nil {
+		t.Fatalf("AbortRollout: %v", err)
+	}
+	if stage := aborted.Stages[0]; stage.State != store.StageStopped || stage.FinishedAt == nil {
+		t.Fatalf("stage = %+v", stage)
+	}
+	if stage := aborted.Stages[1]; stage.State != store.StagePending {
+		t.Fatalf("a later stage = %+v, want it left pending", stage)
+	}
+}
+
+func TestAbortingADraftStopsNoStage(t *testing.T) {
+	e := newEngineWorld(t, 20)
+	draft := e.world.mustCreate(t, e.ctx, "draft-only")
+	aborted, err := e.store.AbortRollout(e.ctx, draft.ID, byAdmin)
+	if err != nil {
+		t.Fatalf("AbortRollout: %v", err)
+	}
+	for _, stage := range aborted.Stages {
+		if stage.State != store.StagePending {
+			t.Fatalf("stage = %+v", stage)
+		}
+	}
+}
+
+func TestAbortAfterAHaltKeepsTheStageVerdict(t *testing.T) {
+	e := newEngineWorld(t, 20)
+	r := e.startRollout(nil)
+	e.finish(r.ID, rollout.AssignmentFailed, 1)
+	e.advance(r.ID)
+	aborted, err := e.store.AbortRollout(e.ctx, r.ID, byAdmin)
+	if err != nil {
+		t.Fatalf("AbortRollout: %v", err)
+	}
+	if got := aborted.Stages[0].State; got != store.StageFailed {
+		t.Fatalf("stage = %q, want it to stay failed", got)
 	}
 }

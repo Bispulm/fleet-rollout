@@ -314,9 +314,16 @@ func (s *Store) ResumeRollout(ctx context.Context, id string, opts TransitionOpt
 // reached installation are superseded. Devices keep whatever they have installed, and
 // the fleet is free for another rollout.
 func (s *Store) AbortRollout(ctx context.Context, id string, opts TransitionOptions) (Rollout, error) {
-	return s.transition(ctx, id, rollout.EventAbort, opts, func(tx pgx.Tx, _ lockedRollout, to rollout.State, now time.Time) error {
+	return s.transition(ctx, id, rollout.EventAbort, opts, func(tx pgx.Tx, current lockedRollout, to rollout.State, now time.Time) error {
 		if err := supersedeUnstarted(ctx, tx, id, now); err != nil {
 			return err
+		}
+		// A stage that already has a verdict keeps it, and a draft has no current stage.
+		if _, err := tx.Exec(ctx, `
+			UPDATE rollout_stages SET state = 'stopped', finished_at = $3
+			WHERE rollout_id = $1 AND ordinal = $2 AND state IN ('active', 'soaking')`,
+			id, current.currentStage, now); err != nil {
+			return fmt.Errorf("stop stage: %w", err)
 		}
 		_, err := tx.Exec(ctx, `
 			UPDATE rollouts SET state = $2, revision = revision + 1, paused_from = NULL, paused_at = NULL, finished_at = $3

@@ -198,8 +198,8 @@ func promote(ctx context.Context, tx pgx.Tx, r Rollout, now time.Time) (AdvanceR
 }
 
 // halt stops the rollout and cancels work that hasn't reached installation, in one
-// transaction. The current stage fails. An earlier stage keeps its verdict, even if a
-// late failure there is the reason for the halt.
+// transaction. The current stage fails only if its own results are the reason. An earlier
+// stage keeps its verdict, even if a late failure there is what caused the halt.
 func halt(ctx context.Context, tx pgx.Tx, r Rollout, verdict rollout.Verdict, now time.Time) (AdvanceResult, error) {
 	to, err := rollout.Next(r.State, rollout.EventBreach, "")
 	if err != nil {
@@ -208,10 +208,14 @@ func halt(ctx context.Context, tx pgx.Tx, r Rollout, verdict rollout.Verdict, no
 	if err := supersedeUnstarted(ctx, tx, r.ID, now); err != nil {
 		return AdvanceResult{}, err
 	}
+	stageState := StageFailed
+	if verdict.Reason == rollout.HaltLateRegression || verdict.Reason == rollout.HaltRolloutBreach {
+		stageState = StageStopped
+	}
 	if _, err := tx.Exec(ctx, `
-		UPDATE rollout_stages SET state = 'failed', finished_at = $3
-		WHERE rollout_id = $1 AND ordinal = $2`, r.ID, *r.CurrentStage, now); err != nil {
-		return AdvanceResult{}, fmt.Errorf("fail stage: %w", err)
+		UPDATE rollout_stages SET state = $3, finished_at = $4
+		WHERE rollout_id = $1 AND ordinal = $2`, r.ID, *r.CurrentStage, stageState, now); err != nil {
+		return AdvanceResult{}, fmt.Errorf("end stage: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE rollouts
