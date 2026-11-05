@@ -3,12 +3,14 @@
 package artifactstore
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/Bispulm/fleet-rollout/internal/rollout"
 )
@@ -138,3 +140,52 @@ func syncDir(dir string) error {
 	}
 	return nil
 }
+
+// Memory keeps content in memory, for tests and the simulator.
+type Memory struct {
+	mu      sync.Mutex
+	content map[string][]byte
+}
+
+// NewMemory returns an empty store.
+func NewMemory() *Memory { return &Memory{content: map[string][]byte{}} }
+
+// Put implements Store.
+func (m *Memory) Put(ctx context.Context, id string, content io.Reader, check func(io.Reader) error) error {
+	if !rollout.ValidUUID(id) {
+		return fmt.Errorf("artifact ID %q isn't a canonical UUID", id)
+	}
+	data, err := io.ReadAll(content)
+	if err != nil {
+		return fmt.Errorf("read artifact: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("store artifact: %w", err)
+	}
+	if err := check(bytes.NewReader(data)); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.content[id] = data
+	return nil
+}
+
+// Open implements Store.
+func (m *Memory) Open(_ context.Context, id string) (Object, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	data, ok := m.content[id]
+	if !ok {
+		return nil, fmt.Errorf("artifact %s: %w", id, ErrNotFound)
+	}
+	return memoryObject{Reader: bytes.NewReader(data), size: int64(len(data))}, nil
+}
+
+type memoryObject struct {
+	*bytes.Reader
+	size int64
+}
+
+func (o memoryObject) Size() int64  { return o.size }
+func (o memoryObject) Close() error { return nil }
