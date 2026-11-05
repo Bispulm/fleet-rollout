@@ -44,6 +44,8 @@ const (
 	ReasonInterrupted      = "interrupted"
 	ReasonLostState        = "lost_state"
 	ReasonUnsupportedKind  = "unsupported_kind"
+	ReasonNothingToRestore = "nothing_to_restore"
+	ReasonRestoreUnhealthy = "restore_unhealthy"
 )
 
 const (
@@ -142,6 +144,14 @@ const (
 	PhaseInstalling  Phase = "installing"
 	PhaseHealthCheck Phase = "health_check"
 	PhaseReverting   Phase = "reverting"
+	// PhaseRestoring is a rollback switching back to the previous slot, once the server agreed.
+	PhaseRestoring Phase = "restoring"
+)
+
+// The kinds of work.
+const (
+	KindForward  = "forward"
+	KindRollback = "rollback"
 )
 
 // Installed describes the release in a slot.
@@ -154,11 +164,15 @@ type Installed struct {
 
 // Work is an assignment in progress.
 type Work struct {
-	AssignmentID string         `json:"assignment_id"`
-	RolloutID    string         `json:"rollout_id"`
-	Generation   int64          `json:"generation"`
-	Artifact     apiv1.Artifact `json:"artifact"`
-	Phase        Phase          `json:"phase"`
+	// Kind is forward or rollback. Empty means forward, from before rollback existed.
+	Kind string `json:"kind,omitempty"`
+	// RestoreRelease is the release a rollback restores.
+	RestoreRelease int64          `json:"restore_release,omitempty"`
+	AssignmentID   string         `json:"assignment_id"`
+	RolloutID      string         `json:"rollout_id"`
+	Generation     int64          `json:"generation"`
+	Artifact       apiv1.Artifact `json:"artifact"`
+	Phase          Phase          `json:"phase"`
 	// Envelope is the signed manifest. It's verified again whenever it's loaded.
 	Envelope *signing.Envelope `json:"envelope,omitempty"`
 	// VerifiedChunks is how many chunks of the partial download passed their digest.
@@ -310,6 +324,11 @@ func (a *Agent) recover() error {
 		return nil
 	}
 
+	if work.Kind == KindRollback {
+		// Nothing was downloaded, and nothing changes until the one save that switches slots,
+		// so a restore that was cut short just starts again.
+		return nil
+	}
 	switch work.Phase {
 	case PhaseInstalling, PhaseHealthCheck:
 		// There's no way to prove the install or health check finished, so the new slot
@@ -390,6 +409,8 @@ func (a *Agent) Step(ctx context.Context) (time.Duration, error) {
 			return 0, a.stepHealthCheck(ctx)
 		case PhaseReverting:
 			return 0, a.stepRevert(ctx)
+		case PhaseRestoring:
+			return 0, a.stepRestore(ctx)
 		}
 	}
 
@@ -548,7 +569,9 @@ func (a *Agent) startWork(assignment apiv1.DeviceAssignment) error {
 		// The server thinks this device is partway through installing, but the device has
 		// no record of it. It must have lost its state.
 		return reject(ReasonLostState)
-	case assignment.Kind != "forward":
+	case assignment.Kind == KindRollback:
+		return a.startRollback(assignment, next, reject)
+	case assignment.Kind != KindForward:
 		return reject(ReasonUnsupportedKind)
 	case artifact.Platform != a.config.Platform:
 		return reject(ReasonPlatformMismatch)
@@ -903,7 +926,68 @@ func (a *Agent) beginInstall() error {
 	next := a.cp.clone()
 	next.Work.Phase = PhaseInstalling
 	next.Work.PendingSlot = otherSlot(a.cp.ActiveSlot)
+	if next.Work.Kind == KindRollback {
+		next.Work.Phase = PhaseRestoring
+	}
 	next.Work.Claim = nil
+	return a.commit(next)
+}
+
+// startRollback takes on a rollback assignment, which restores the release the device ran before
+// this rollout from its previous slot. The server's permission covers only this one step back,
+// and only to the release the device itself recorded (ADR 0011).
+func (a *Agent) startRollback(assignment apiv1.DeviceAssignment, next Checkpoint, reject func(string) error) error {
+	artifact := assignment.Artifact
+	switch {
+	case assignment.RestoreRelease == nil:
+		return reject(ReasonNothingToRestore)
+	case a.cp.Active.Release == *assignment.RestoreRelease:
+		// It's already running what it would restore, so there's nothing to undo.
+		if assignment.Directive == rollout.DirectiveHold {
+			return nil
+		}
+		next.enqueue(assignment.RolloutID, assignment.ID, assignment.Generation, rollout.AssignmentHealthCheck, "")
+		next.enqueue(assignment.RolloutID, assignment.ID, assignment.Generation, rollout.AssignmentSucceeded, "")
+		return a.commit(next)
+	case a.cp.Active.Release != artifact.ReleaseCounter || a.cp.Active.SHA256 != artifact.SHA256,
+		a.cp.Previous == nil, a.cp.Previous.Release != *assignment.RestoreRelease:
+		return reject(ReasonNothingToRestore)
+	}
+	next.Work = &Work{
+		Kind:           KindRollback,
+		RestoreRelease: *assignment.RestoreRelease,
+		AssignmentID:   assignment.ID,
+		RolloutID:      assignment.RolloutID,
+		Generation:     assignment.Generation,
+		Artifact:       artifact,
+		Phase:          PhaseReady,
+		Held:           assignment.Directive == rollout.DirectiveHold,
+	}
+	return a.commit(next)
+}
+
+// stepRestore switches back to the previous slot, in one save, after checking the release there.
+// The release a device shipped with was never installed by the agent, so there's nothing in its
+// slot to check, and it's known to have been running before this rollout.
+func (a *Agent) stepRestore(ctx context.Context) error {
+	work := a.cp.Work
+	previousSlot := otherSlot(a.cp.ActiveSlot)
+	next := a.cp.clone()
+	next.Work = nil
+	if a.cp.Previous.ArtifactID != "" {
+		if err := a.deps.Installer.HealthCheck(ctx, previousSlot); err != nil {
+			a.deps.Logger.LogAttrs(ctx, slog.LevelWarn, "the release to restore is unhealthy",
+				slog.String("device_id", a.config.DeviceID), slog.Any("error", err))
+			next.enqueue(work.RolloutID, work.AssignmentID, work.Generation, rollout.AssignmentFailed, ReasonRestoreUnhealthy)
+			return a.commit(next)
+		}
+	}
+	current := a.cp.Active
+	next.Active = *a.cp.Previous
+	next.Previous = &current
+	next.ActiveSlot = previousSlot
+	next.enqueue(work.RolloutID, work.AssignmentID, work.Generation, rollout.AssignmentHealthCheck, "")
+	next.enqueue(work.RolloutID, work.AssignmentID, work.Generation, rollout.AssignmentSucceeded, "")
 	return a.commit(next)
 }
 
