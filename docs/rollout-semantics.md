@@ -19,7 +19,7 @@ status, since the semantics were settled before all of the code that enforces th
 
 ## Membership
 
-**Status: Specified.**
+**Status: Implemented.**
 
 Membership freezes in the transaction that starts a rollout and never changes afterward. Database
 triggers reject inserts, updates, and deletes on frozen membership, so an application bug can't
@@ -45,7 +45,7 @@ update?" has an answer.
 
 ## Cohorts
 
-**Status: Specified.**
+**Status: Implemented.**
 
 Each device's rank key is SHA-256 over a domain tag and the length-prefixed rollout ID and device
 ID. Members sort by rank key, then by device ID as a tie-breaker, and get positions 1 to N.
@@ -59,7 +59,7 @@ independent order, so the same devices aren't always first.
 
 ## Small fleets and sample sizes
 
-**Status: Specified.**
+**Status: Implemented.**
 
 Rounding up means every non-empty stage exposes at least one device, and rounding can leave a stage
 with no new devices. On a fleet of 3 with stages 1, 10, 50, 100, the targets are 1, 1, 2, 3.
@@ -75,7 +75,7 @@ the frozen membership. A rollout that passes both can't get stuck on sample size
 
 ## Stage progression
 
-**Status: Specified.** The engine isn't built yet.
+**Status: Specified,** except where a subsection says otherwise. The engine isn't built yet.
 
 All comparisons use integer arithmetic on basis points, where 10,000 is 100%, so there is no
 floating-point rounding at a boundary.
@@ -137,6 +137,8 @@ device has time to be classified as unknown before the deadline applies.
 
 ### Pause
 
+**Status: Implemented** for the clocks. Evaluating safety during a pause is **Specified**.
+
 Pause stops the soak and deadline clocks. On resume, the deadline moves later by the length of the
 pause, so a pause can't make a stage time out by itself. Safety checks keep running during a pause,
 so a breach moves the rollout from `paused` to `halted`.
@@ -160,7 +162,9 @@ part of the rollout's record.
 
 ## States and transitions
 
-**Status: Specified.**
+**Status: Implemented** for start, pause, resume, and abort, including row locking, revision checks,
+and the audit log. Events driven by the engine or by rollback are **Specified**: the table allows them,
+but nothing issues them yet.
 
 | From | Event | To |
 |---|---|---|
@@ -187,7 +191,8 @@ and any revision the caller supplied, bumps the revision, and appends an audit r
 
 ## Assignments and reports
 
-**Status: Specified.**
+**Status: Specified.** The schema's uniqueness and append-only rules are implemented and tested, but
+no code issues assignments or accepts reports yet.
 
 - A device has at most one open assignment, across all rollouts.
 - Each assignment has a generation and an expiry. Pause, halt, and rollback stop new forward
