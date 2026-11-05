@@ -199,6 +199,7 @@ func (e *Engine) release(ctx context.Context) {
 		e.logger.LogAttrs(ctx, slog.LevelWarn, "release engine lease", slog.Any("error", err))
 	}
 	e.fence = nil
+	e.metrics.Leading(false)
 }
 
 func tracerFrom(provider trace.TracerProvider) trace.Tracer {

@@ -308,6 +308,40 @@ func TestDecisionsHaltsAndLeadershipAreCounted(t *testing.T) {
 	}
 }
 
+func TestGivingUpTheLeaseStopsReportingLeadership(t *testing.T) {
+	f := &fakeStore{acquireOK: true}
+	m := metrics.New()
+	e := engine.New(engine.Options{
+		Store: f, Holder: "test", Interval: time.Hour, LeaseTTL: time.Minute,
+		Logger: slog.New(slog.DiscardHandler), Metrics: m,
+	})
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- e.Run(ctx) }()
+	// The first tick runs at once, and takes the lease.
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(scrapeMetrics(t, m), "fleet_rollout_engine_leader 1\n") {
+		if time.Now().After(deadline) {
+			t.Fatal("the engine never took the lease")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if body := scrapeMetrics(t, m); !strings.Contains(body, "fleet_rollout_engine_leader 0\n") {
+		t.Error("an instance that gave up the lease on the way out still reports leading")
+	}
+}
+
+func scrapeMetrics(t *testing.T, m *metrics.Metrics) string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", nil))
+	return rec.Body.String()
+}
+
 func TestEachEvaluationIsTraced(t *testing.T) {
 	recorder := tracetest.NewSpanRecorder()
 	f := &fakeStore{acquireOK: true, rollouts: []string{"r1"}, steps: map[string]int{"r1": 1}}
