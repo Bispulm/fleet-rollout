@@ -782,3 +782,63 @@ func TestPollWaitsForAPauseThatIsCommitting(t *testing.T) {
 		t.Fatalf("issued an assignment after the pause committed: %+v", got.assignment)
 	}
 }
+
+// A report's foreign key check takes a key-share lock on the rollout row, while holding
+// its assignment. The engine holds the rollout row while cancelling assignments. If those
+// locks conflicted, the two could deadlock, and Postgres would kill one of them. So a
+// report has to get through while the engine is mid-decision on the same rollout.
+func TestReportsAreNotBlockedByAnEngineDecisionInProgress(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	clock := newFakeClock()
+	pool := testdb.New(t)
+	s := store.New(pool, store.WithClock(clock.Now))
+	w := newWorld(t, ctx, s, 100)
+	r := mustStart(t, s, w.mustCreate(t, ctx, "demo"))
+	e := &engineWorld{t: t, ctx: ctx, store: s, clock: clock, world: w, fence: mustAcquire(t, ctx, s, "engine-a")}
+
+	// Enough for the engine to halt: stage 1 has 10 devices, and one has failed.
+	e.finish(r.ID, rollout.AssignmentFailed, 1)
+	waiting := poll(t, ctx, s, memberAt(t, ctx, s, r.ID, 2))
+	reporter := memberAt(t, ctx, s, r.ID, 3)
+	inFlight := poll(t, ctx, s, reporter)
+	mustReport(t, ctx, s, reporter, inFlight, 1, rollout.AssignmentInstalling)
+
+	// Stall the engine partway through its halt, holding the rollout row, by holding
+	// an assignment it has to cancel.
+	blocker, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	defer func() { _ = blocker.Rollback(ctx) }()
+	if _, err := blocker.Exec(ctx, `SELECT 1 FROM assignments WHERE id = $1 FOR UPDATE`, waiting.ID); err != nil {
+		t.Fatalf("hold assignment: %v", err)
+	}
+	advanced := make(chan error, 1)
+	go func() {
+		_, err := s.AdvanceRollout(ctx, r.ID, e.fence)
+		advanced <- err
+	}()
+	waitForBlockedSessions(t, ctx, pool, 1)
+
+	reportCtx, cancelReport := context.WithTimeout(ctx, 3*time.Second)
+	defer cancelReport()
+	result, err := s.RecordReport(reportCtx, reportFor(reporter, inFlight, 2, rollout.AssignmentHealthCheck))
+	if err != nil {
+		t.Fatalf("a report blocked on the engine's lock on the rollout: %v", err)
+	}
+	if !result.Applied {
+		t.Fatalf("report = %+v", result)
+	}
+
+	if err := blocker.Rollback(ctx); err != nil {
+		t.Fatalf("release assignment: %v", err)
+	}
+	if err := <-advanced; err != nil {
+		t.Fatalf("AdvanceRollout: %v", err)
+	}
+	if got := e.get(r.ID).State; got != rollout.StateHalted {
+		t.Fatalf("state = %s, want halted", got)
+	}
+}

@@ -108,11 +108,16 @@ func (s *Store) transition(
 	return s.GetRollout(ctx, id)
 }
 
+// lockRollout takes the rollout's row lock for a state change. FOR NO KEY UPDATE is the
+// right strength, since no key changes. It still blocks a poll's FOR SHARE, so nothing
+// can be issued mid-transition. Plain FOR UPDATE would also block the key-share lock a
+// report's foreign key check takes on this row, while that report holds an assignment a
+// halt needs to cancel, and the two would deadlock.
 func lockRollout(ctx context.Context, tx pgx.Tx, id string) (lockedRollout, error) {
 	current := lockedRollout{id: id}
 	err := tx.QueryRow(ctx, `
 		SELECT fleet_id, artifact_id, state, revision, policy, paused_from, paused_at, current_stage
-		FROM rollouts WHERE id = $1 FOR UPDATE`, id).Scan(
+		FROM rollouts WHERE id = $1 FOR NO KEY UPDATE`, id).Scan(
 		&current.fleetID, &current.artifactID, &current.state, &current.revision, &current.policy,
 		&current.pausedFrom, &current.pausedAt, &current.currentStage)
 	if errors.Is(err, pgx.ErrNoRows) {
