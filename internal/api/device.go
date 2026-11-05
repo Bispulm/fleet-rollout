@@ -16,10 +16,9 @@ import (
 )
 
 const (
-	deviceRequestTimeout   = 10 * time.Second
-	maxDeviceBodyBytes     = 64 << 10
-	defaultPollInterval    = 60 * time.Second
-	defaultAssignmentLease = 5 * time.Minute
+	deviceRequestTimeout = 10 * time.Second
+	maxDeviceBodyBytes   = 64 << 10
+	defaultPollInterval  = 60 * time.Second
 	// defaultMaxDeviceRequests is comfortably more than the connection pool, so database
 	// connections are what actually queue, and only briefly.
 	defaultMaxDeviceRequests = 256
@@ -80,14 +79,13 @@ func writeDeviceUnauthorized(w http.ResponseWriter) {
 }
 
 func (s *Server) handleDevicePoll(w http.ResponseWriter, r *http.Request, device store.Device) error {
-	assignment, err := s.store.PollAssignment(r.Context(), device, s.assignmentLease)
+	assignment, err := s.store.PollAssignment(r.Context(), device)
 	if err != nil {
 		return err
 	}
 	out := apiv1.PollResponse{PollAfterSeconds: int(s.pollInterval / time.Second)}
 	if assignment != nil {
 		document := deviceAssignmentDocument(*assignment)
-		document.LeaseSeconds = int(s.assignmentLease / time.Second)
 		out.Assignment = &document
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -145,7 +143,6 @@ func deviceAssignmentDocument(a store.Assignment) apiv1.DeviceAssignment {
 		State:      a.State,
 		Directive:  a.Directive,
 		Kind:       a.Kind,
-		ExpiresAt:  a.ExpiresAt,
 		Artifact:   artifactDocument(a.Artifact),
 	}
 }

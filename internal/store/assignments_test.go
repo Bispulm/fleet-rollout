@@ -12,8 +12,6 @@ import (
 	"github.com/Bispulm/fleet-rollout/internal/store"
 )
 
-const testLease = 5 * time.Minute
-
 // mustAuthenticate returns the device the way the API would after checking its token.
 func mustAuthenticate(t *testing.T, ctx context.Context, s *store.Store, id string) store.Device {
 	t.Helper()
@@ -46,7 +44,7 @@ func memberAt(t *testing.T, ctx context.Context, s *store.Store, rolloutID strin
 
 func poll(t *testing.T, ctx context.Context, s *store.Store, deviceID string) *store.Assignment {
 	t.Helper()
-	assignment, err := s.PollAssignment(ctx, mustAuthenticate(t, ctx, s, deviceID), testLease)
+	assignment, err := s.PollAssignment(ctx, mustAuthenticate(t, ctx, s, deviceID))
 	if err != nil {
 		t.Fatalf("PollAssignment(%s): %v", deviceID, err)
 	}
@@ -102,9 +100,6 @@ func TestPollIssuesAssignmentOnlyToExposedStages(t *testing.T) {
 	if assignment.Artifact.ID != w.artifact.ID || assignment.Artifact.SHA256 != w.artifact.SHA256 {
 		t.Fatalf("artifact = %+v", assignment.Artifact)
 	}
-	if want := clock.Now().Add(testLease); !assignment.ExpiresAt.Equal(want) {
-		t.Fatalf("expires at %v, want %v", assignment.ExpiresAt, want)
-	}
 
 	if got := poll(t, ctx, s, third); got != nil {
 		t.Fatalf("a device in a later stage got an assignment: %+v", got)
@@ -122,7 +117,7 @@ func TestPollRecordsThatTheDeviceWasSeen(t *testing.T) {
 	}
 }
 
-func TestRepeatedPollsReturnTheSameAssignmentAndRenewTheLease(t *testing.T) {
+func TestRepeatedPollsReturnTheSameAssignment(t *testing.T) {
 	clock := newFakeClock()
 	s, ctx := newStore(t, store.WithClock(clock.Now))
 	_, r := startedWorld(t, ctx, s, 20)
@@ -133,9 +128,6 @@ func TestRepeatedPollsReturnTheSameAssignmentAndRenewTheLease(t *testing.T) {
 	second := poll(t, ctx, s, device)
 	if second.ID != first.ID {
 		t.Fatalf("second poll returned %s, want %s", second.ID, first.ID)
-	}
-	if want := clock.Now().Add(testLease); !second.ExpiresAt.Equal(want) {
-		t.Fatalf("lease wasn't renewed: expires at %v, want %v", second.ExpiresAt, want)
 	}
 }
 
@@ -150,7 +142,7 @@ func TestConcurrentPollsIssueOneAssignment(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := range attempts {
 		wg.Go(func() {
-			assignment, err := s.PollAssignment(ctx, device, testLease)
+			assignment, err := s.PollAssignment(ctx, device)
 			errs[i] = err
 			if assignment != nil {
 				ids[i] = assignment.ID
@@ -219,11 +211,8 @@ func TestPauseStopsNewAssignmentsAndHoldsUnstartedOnes(t *testing.T) {
 
 	clock.Advance(time.Minute)
 	held := poll(t, ctx, s, holding)
-	if held == nil || held.Directive != rollout.DirectiveHold {
-		t.Fatalf("assignment during a pause = %+v, want hold", held)
-	}
-	if !held.ExpiresAt.Equal(before.ExpiresAt) {
-		t.Fatalf("lease was renewed during a hold: %v, was %v", held.ExpiresAt, before.ExpiresAt)
+	if held == nil || held.Directive != rollout.DirectiveHold || held.ID != before.ID {
+		t.Fatalf("assignment during a pause = %+v, want the same one, on hold", held)
 	}
 
 	if _, err := s.ResumeRollout(ctx, r.ID, byAdmin); err != nil {
@@ -252,9 +241,6 @@ func TestPauseLetsInFlightDevicesFinish(t *testing.T) {
 	got := poll(t, ctx, s, device)
 	if got == nil || got.Directive != rollout.DirectiveProceed {
 		t.Fatalf("in-flight assignment during a pause = %+v, want proceed", got)
-	}
-	if want := clock.Now().Add(testLease); !got.ExpiresAt.Equal(want) {
-		t.Fatalf("lease = %v, want it renewed to %v", got.ExpiresAt, want)
 	}
 }
 
@@ -309,7 +295,7 @@ func TestAPauseCommittedBeforeAPollAlwaysWins(t *testing.T) {
 				t.Errorf("AuthenticateDevice: %v", err)
 				return
 			}
-			if _, err := s.PollAssignment(ctx, device, testLease); err != nil {
+			if _, err := s.PollAssignment(ctx, device); err != nil {
 				t.Errorf("PollAssignment: %v", err)
 			}
 		})

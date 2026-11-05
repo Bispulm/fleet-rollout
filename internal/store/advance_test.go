@@ -602,7 +602,7 @@ func TestRestartRebuildsEverythingFromTheDatabase(t *testing.T) {
 		t.Fatalf("result = %+v, err = %v, want time before the restart counted", got, err)
 	}
 	// Assignments aren't duplicated either: the first devices have nothing further.
-	if a, err := after.PollAssignment(ctx, mustAuthenticate(t, ctx, after, memberAt(t, ctx, after, r.ID, 1)), testLease); err != nil || a != nil {
+	if a, err := after.PollAssignment(ctx, mustAuthenticate(t, ctx, after, memberAt(t, ctx, after, r.ID, 1))); err != nil || a != nil {
 		t.Fatalf("poll after restart = %+v, err = %v", a, err)
 	}
 }
@@ -766,7 +766,7 @@ func TestPollWaitsForAPauseThatIsCommitting(t *testing.T) {
 	}
 	polled := make(chan pollResult, 1)
 	go func() {
-		assignment, err := s.PollAssignment(ctx, device, testLease)
+		assignment, err := s.PollAssignment(ctx, device)
 		polled <- pollResult{assignment, err}
 	}()
 	waitForBlockedSessions(t, ctx, pool, 1)

@@ -204,8 +204,9 @@ type TransitionLog struct {
 	Transitions []Transition `json:"transitions"`
 }
 
-// DeviceAssignment is what a device is told to do. A device must not begin installing
-// after ExpiresAt without polling again.
+// DeviceAssignment is what a device is told to do. The directive is advice. Whether the
+// device may start installing is decided when it reports installing, which it must do
+// and have applied before it starts.
 type DeviceAssignment struct {
 	ID         string                  `json:"id"`
 	RolloutID  string                  `json:"rollout_id"`
@@ -214,11 +215,7 @@ type DeviceAssignment struct {
 	State      rollout.AssignmentState `json:"state"`
 	Directive  rollout.Directive       `json:"directive"`
 	Kind       string                  `json:"kind"`
-	ExpiresAt  time.Time               `json:"expires_at"`
-	// LeaseSeconds is how long from receiving this response the lease lasts. A device
-	// should use this rather than ExpiresAt, because its clock may not match the server's.
-	LeaseSeconds int      `json:"lease_seconds"`
-	Artifact     Artifact `json:"artifact"`
+	Artifact   Artifact                `json:"artifact"`
 }
 
 // PollResponse is the response to POST /v1/device/poll. Assignment is null when there's

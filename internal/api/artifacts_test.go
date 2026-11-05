@@ -247,7 +247,7 @@ func (h harness) deviceGet(token, path, rangeHeader, ifRange string) (deviceResp
 func TestADeviceFetchesTheManifestItCanVerify(t *testing.T) {
 	f := newDeviceFixture(t)
 	a := f.poll(f.first).Assignment
-	if a.Kind != "forward" || a.LeaseSeconds <= 0 {
+	if a.Kind != "forward" {
 		t.Fatalf("assignment = %+v", a)
 	}
 	resp, raw := f.deviceGet(f.first, "/v1/device/artifacts/"+a.Artifact.ID+"/manifest", "", "")

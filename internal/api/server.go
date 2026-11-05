@@ -31,9 +31,6 @@ type Options struct {
 	AdminToken string
 	// PollInterval is how often devices are told to poll.
 	PollInterval time.Duration
-	// AssignmentLease is how long a device may keep working on an assignment without
-	// hearing from the server.
-	AssignmentLease time.Duration
 	// Trust is who may sign artifacts.
 	Trust signing.TrustSet
 	// Artifacts holds artifact bytes.
@@ -56,7 +53,6 @@ type Server struct {
 	draining  atomic.Bool
 
 	pollInterval     time.Duration
-	assignmentLease  time.Duration
 	trust            signing.TrustSet
 	artifacts        artifactstore.Store
 	maxArtifactBytes int64
@@ -72,7 +68,6 @@ func New(opts Options) *Server {
 		mux:    http.NewServeMux(),
 
 		pollInterval:     opts.PollInterval,
-		assignmentLease:  opts.AssignmentLease,
 		trust:            opts.Trust,
 		artifacts:        opts.Artifacts,
 		maxArtifactBytes: opts.MaxArtifactBytes,
@@ -87,9 +82,6 @@ func New(opts Options) *Server {
 	s.deviceSlots = make(chan struct{}, slots)
 	if s.pollInterval == 0 {
 		s.pollInterval = defaultPollInterval
-	}
-	if s.assignmentLease == 0 {
-		s.assignmentLease = defaultAssignmentLease
 	}
 	s.handler = observe(s.logger, http.HandlerFunc(s.route))
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)

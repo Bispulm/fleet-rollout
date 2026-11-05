@@ -12,6 +12,9 @@ import (
 	"github.com/Bispulm/fleet-rollout/internal/testdb"
 )
 
+// testQuiet is a stretch of time without hearing from a device.
+const testQuiet = 5 * time.Minute
+
 func reportFor(device string, a *store.Assignment, sequence int64, state rollout.AssignmentState) store.Report {
 	return store.Report{
 		DeviceID:     device,
@@ -260,7 +263,7 @@ func TestReportUpdatesLastSeen(t *testing.T) {
 	clock := newFakeClock()
 	s, ctx := newStore(t, store.WithClock(clock.Now))
 	device, a, _ := assignedDevice(t, ctx, s)
-	clock.Advance(testLease)
+	clock.Advance(testQuiet)
 	mustReport(t, ctx, s, device, a, 1, rollout.AssignmentDownloading)
 	if got := mustAuthenticate(t, ctx, s, device).LastSeenAt; !got.Equal(clock.Now()) {
 		t.Fatalf("last seen = %v, want %v", got, clock.Now())
@@ -309,7 +312,7 @@ func TestStatusCountsEveryKindOfOutcome(t *testing.T) {
 	input := w.newRollout(t, "demo")
 	input.Policy = mustPolicy(t, func(p *rollout.PolicySpec) {
 		p.Stages = []rollout.StageSpec{{Percent: 100}}
-		p.Safety.StaleAfter = ptr(rollout.Duration(testLease))
+		p.Safety.StaleAfter = ptr(rollout.Duration(testQuiet))
 	})
 	created, _, err := s.CreateRollout(ctx, "lab-a", input)
 	if err != nil {
@@ -332,7 +335,7 @@ func TestStatusCountsEveryKindOfOutcome(t *testing.T) {
 	report(5) // Assigned, and heard from.
 
 	// Everyone goes quiet except positions 5 and 6, which are heard from late on.
-	clock.Advance(testLease + time.Second)
+	clock.Advance(testQuiet + time.Second)
 	poll(t, ctx, s, at(5))
 	poll(t, ctx, s, at(6))
 

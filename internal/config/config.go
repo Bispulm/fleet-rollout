@@ -19,13 +19,10 @@ const (
 	defaultEngineInterval    = 5 * time.Second
 	defaultEngineLeaseTTL    = 30 * time.Second
 	defaultPollInterval      = time.Minute
-	defaultAssignmentLease   = 5 * time.Minute
 	defaultMaxArtifactBytes  = 1 << 30
 	defaultMaxDeviceRequests = 256
 	// A slow tick or two shouldn't cost the engine its lease.
 	minLeaseTTLIntervals = 3
-	// A device that misses one poll shouldn't lose its assignment's lease.
-	minLeasePollIntervals = 2
 )
 
 // Config holds the settings for the rolloutd server.
@@ -43,11 +40,10 @@ type Config struct {
 	MaxArtifactBytes  int64
 	MaxDeviceRequests int
 
-	EngineEnabled   bool
-	EngineInterval  time.Duration
-	EngineLeaseTTL  time.Duration
-	PollInterval    time.Duration
-	AssignmentLease time.Duration
+	EngineEnabled  bool
+	EngineInterval time.Duration
+	EngineLeaseTTL time.Duration
+	PollInterval   time.Duration
 }
 
 // Load reads settings through getenv, which is normally os.Getenv. It reports
@@ -62,7 +58,6 @@ func Load(getenv func(string) string) (Config, error) {
 		EngineInterval:  defaultEngineInterval,
 		EngineLeaseTTL:  defaultEngineLeaseTTL,
 		PollInterval:    defaultPollInterval,
-		AssignmentLease: defaultAssignmentLease,
 	}
 	var problems []error
 
@@ -167,7 +162,6 @@ func (cfg *Config) loadTiming(getenv func(string) string) []error {
 		{"ROLLOUTD_ENGINE_INTERVAL", &cfg.EngineInterval},
 		{"ROLLOUTD_ENGINE_LEASE_TTL", &cfg.EngineLeaseTTL},
 		{"ROLLOUTD_POLL_INTERVAL", &cfg.PollInterval},
-		{"ROLLOUTD_ASSIGNMENT_LEASE", &cfg.AssignmentLease},
 	}
 	for _, d := range durations {
 		v := getenv(d.name)
@@ -186,9 +180,6 @@ func (cfg *Config) loadTiming(getenv func(string) string) []error {
 	}
 	if cfg.PollInterval < time.Second {
 		problems = append(problems, errors.New("ROLLOUTD_POLL_INTERVAL must be at least 1s"))
-	}
-	if cfg.AssignmentLease < minLeasePollIntervals*cfg.PollInterval {
-		problems = append(problems, fmt.Errorf("ROLLOUTD_ASSIGNMENT_LEASE must be at least %d times ROLLOUTD_POLL_INTERVAL", minLeasePollIntervals))
 	}
 	return problems
 }

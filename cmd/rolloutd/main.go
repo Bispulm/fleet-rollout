@@ -112,7 +112,6 @@ func runServe(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger
 		Store:             st,
 		AdminToken:        cfg.AdminToken,
 		PollInterval:      cfg.PollInterval,
-		AssignmentLease:   cfg.AssignmentLease,
 		Trust:             trust,
 		Artifacts:         artifacts,
 		MaxArtifactBytes:  cfg.MaxArtifactBytes,

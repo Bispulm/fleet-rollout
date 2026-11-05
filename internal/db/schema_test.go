@@ -284,8 +284,8 @@ func exposedFixture(t *testing.T, ctx context.Context) fixture {
 func (f fixture) assign(ctx context.Context, generation int) (string, error) {
 	var id string
 	err := f.pool.QueryRow(ctx, `INSERT INTO assignments
-		(rollout_id, device_id, generation, kind, stage_ordinal, issued_at, expires_at)
-		VALUES ($1, $2, $3, 'forward', 1, now(), now() + interval '1 hour') RETURNING id`,
+		(rollout_id, device_id, generation, kind, stage_ordinal, issued_at)
+		VALUES ($1, $2, $3, 'forward', 1, now()) RETURNING id`,
 		f.rolloutID, f.deviceID, generation).Scan(&id)
 	return id, err
 }
@@ -295,8 +295,8 @@ func TestDeviceHasAtMostOneOpenAssignment(t *testing.T) {
 	f := exposedFixture(t, ctx)
 	assignRollback := func() error {
 		_, err := f.pool.Exec(ctx, `INSERT INTO assignments
-			(rollout_id, device_id, generation, kind, stage_ordinal, issued_at, expires_at)
-			VALUES ($1, $2, 2, 'rollback', 1, now(), now() + interval '1 hour')`, f.rolloutID, f.deviceID)
+			(rollout_id, device_id, generation, kind, stage_ordinal, issued_at)
+			VALUES ($1, $2, 2, 'rollback', 1, now())`, f.rolloutID, f.deviceID)
 		return err
 	}
 
@@ -335,8 +335,8 @@ func TestAssignmentRequiresRolloutMembership(t *testing.T) {
 	mustExec(t, ctx, f.pool, `INSERT INTO devices (id, fleet_id, platform, credential_hash)
 		VALUES ('outsider', $1, 'linux/arm64', sha256('outsider'))`, f.fleetID)
 	_, err := f.pool.Exec(ctx, `INSERT INTO assignments
-		(rollout_id, device_id, kind, stage_ordinal, issued_at, expires_at)
-		VALUES ($1, 'outsider', 'forward', 1, now(), now() + interval '1 hour')`, f.rolloutID)
+		(rollout_id, device_id, kind, stage_ordinal, issued_at)
+		VALUES ($1, 'outsider', 'forward', 1, now())`, f.rolloutID)
 	requireSQLState(t, err, "23503")
 }
 
@@ -371,8 +371,8 @@ func TestMemberHasAtMostOneForwardAssignmentPerRollout(t *testing.T) {
 
 	// A rollback is a different kind of instruction, so it's allowed.
 	mustExec(t, ctx, f.pool, `INSERT INTO assignments
-		(rollout_id, device_id, generation, kind, stage_ordinal, issued_at, expires_at)
-		VALUES ($1, $2, 2, 'rollback', 1, now(), now() + interval '1 hour')`, f.rolloutID, f.deviceID)
+		(rollout_id, device_id, generation, kind, stage_ordinal, issued_at)
+		VALUES ($1, $2, 2, 'rollback', 1, now())`, f.rolloutID, f.deviceID)
 }
 
 func TestDeviceCredentialsAreUnique(t *testing.T) {

@@ -27,7 +27,6 @@ const (
 	testChunk    = 1024
 	testRelease  = 14
 	testPoll     = 60 * time.Second
-	testLease    = 5 * time.Minute
 	testPlatform = "linux/arm64"
 )
 
@@ -200,7 +199,6 @@ func assignmentFor(m signing.Manifest) *apiv1.DeviceAssignment {
 	return &apiv1.DeviceAssignment{
 		ID: "assignment-1", RolloutID: "rollout-1", Generation: 1, Stage: 1, Kind: "forward",
 		State: rollout.AssignmentAssigned, Directive: rollout.DirectiveProceed,
-		LeaseSeconds: int(testLease / time.Second),
 		Artifact: apiv1.Artifact{
 			ID: "artifact-1", Name: m.Name, Version: m.Version, Platform: m.Platform,
 			ReleaseCounter: m.ReleaseCounter, SizeBytes: m.SizeBytes, SHA256: m.SHA256, ChunkSize: m.ChunkSize,

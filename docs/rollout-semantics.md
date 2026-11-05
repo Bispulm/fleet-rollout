@@ -197,7 +197,7 @@ and any revision the caller supplied, bumps the revision, and appends an audit r
 
 ## Assignments and reports
 
-**Status: Implemented,** except that the agent's side of the lease arrives with the agent.
+**Status: Implemented.**
 
 ### Issuing
 
@@ -216,19 +216,21 @@ A device that polls twice at once gets the same assignment both times.
 
 A decommissioned device can't authenticate at all.
 
-### Directives and the validity lease
+### Directives
 
-Each poll returns the device's open assignment with a directive and a validity lease, `expires_at`.
+Each poll returns the device's open assignment with a directive.
 
 | Rollout state | Assignment not yet installing | Assignment in flight |
 |---|---|---|
-| `running`, `soaking` | `proceed`, lease renewed | `proceed`, lease renewed |
-| `paused` | `hold`, lease not renewed | `proceed`, lease renewed |
+| `running`, `soaking` | `proceed` | `proceed` |
+| `paused` | `hold` | `proceed` |
 | `halted`, `aborted`, `completed`, or rolling back | Superseded, so no assignment is returned | `proceed`, to finish and report |
 
-An agent starts installing only once the server has accepted its report of `installing`, as described under
-Reports and in [ADR 0009](adr/0009-installs-need-the-servers-agreement.md). An agent holding an assignment that a
-poll no longer returns must abandon it, unless it's already in flight.
+A directive is advice about the next step, and can be out of date by the time the device acts on it. An agent
+starts installing only once the server has accepted its report of `installing`, as described under Reports and in
+[ADR 0009](adr/0009-installs-need-the-servers-agreement.md), so a stale `proceed` can't start an install the
+server would refuse. An agent holding an assignment that a poll no longer returns must abandon it, unless it's
+already in flight.
 
 ### Reports
 

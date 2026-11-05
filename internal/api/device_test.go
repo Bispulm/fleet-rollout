@@ -135,9 +135,6 @@ func TestPollReturnsAnAssignmentWithItsArtifactAndALease(t *testing.T) {
 	if a.Artifact.ID != f.rollout.ArtifactID || len(a.Artifact.SHA256) != 64 {
 		t.Fatalf("artifact = %+v", a.Artifact)
 	}
-	if a.ExpiresAt.IsZero() {
-		t.Fatal("no lease expiry")
-	}
 	if got := f.poll(f.later); got.Assignment != nil {
 		t.Fatalf("a later-stage device got %+v", got.Assignment)
 	}

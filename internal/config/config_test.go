@@ -139,8 +139,8 @@ func TestLoadEngineAndDeviceTimingDefaults(t *testing.T) {
 	if cfg.EngineInterval != 5*time.Second || cfg.EngineLeaseTTL != 30*time.Second {
 		t.Errorf("engine timing = %v, %v", cfg.EngineInterval, cfg.EngineLeaseTTL)
 	}
-	if cfg.PollInterval != time.Minute || cfg.AssignmentLease != 5*time.Minute {
-		t.Errorf("device timing = %v, %v", cfg.PollInterval, cfg.AssignmentLease)
+	if cfg.PollInterval != time.Minute {
+		t.Errorf("poll interval = %v", cfg.PollInterval)
 	}
 }
 
@@ -165,7 +165,6 @@ func TestLoadRejectsUnsafeTiming(t *testing.T) {
 		{"unparseable TTL", map[string]string{"ROLLOUTD_ENGINE_LEASE_TTL": "soon"}, "ROLLOUTD_ENGINE_LEASE_TTL"},
 		{"TTL shorter than three intervals", map[string]string{"ROLLOUTD_ENGINE_INTERVAL": "10s", "ROLLOUTD_ENGINE_LEASE_TTL": "29s"}, "ROLLOUTD_ENGINE_LEASE_TTL"},
 		{"poll interval under a second", map[string]string{"ROLLOUTD_POLL_INTERVAL": "500ms"}, "ROLLOUTD_POLL_INTERVAL"},
-		{"lease shorter than two polls", map[string]string{"ROLLOUTD_POLL_INTERVAL": "60s", "ROLLOUTD_ASSIGNMENT_LEASE": "119s"}, "ROLLOUTD_ASSIGNMENT_LEASE"},
 		{"bad boolean", map[string]string{"ROLLOUTD_ENGINE_ENABLED": "maybe"}, "ROLLOUTD_ENGINE_ENABLED"},
 	}
 	for _, tc := range cases {
@@ -183,7 +182,6 @@ func TestLoadAcceptsTimingAtTheBoundaries(t *testing.T) {
 		"ROLLOUTD_ENGINE_INTERVAL":  "10s",
 		"ROLLOUTD_ENGINE_LEASE_TTL": "30s",
 		"ROLLOUTD_POLL_INTERVAL":    "1s",
-		"ROLLOUTD_ASSIGNMENT_LEASE": "2s",
 	}))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
