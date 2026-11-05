@@ -9,7 +9,7 @@ assignments to devices that poll, takes their reports, advances stages, and halt
 safety threshold. The device agent downloads signed artifacts in resumable chunks, asks before it installs,
 and reverts a release that fails its health check. A simulator runs fleets of the real agent with faults
 injected around it. On Kubernetes, an operator turns `Rollout` resources into rollouts. A rollout that
-breaches can roll back, restoring what each device ran before. Metrics and dashboards come next. See [what works](#what-works-today)
+breaches can roll back, restoring what each device ran before. Metrics, traces, and a dashboard show it happen. See [what works](#what-works-today)
 and the [roadmap](#roadmap).
 
 All devices are simulated. This isn't meant to run on real hardware.
@@ -234,6 +234,28 @@ helm install fleet-rollout deploy/helm/fleet-rollout --namespace fleet-rollout -
   --set postgres.password="$(openssl rand -hex 16)"
 ```
 
+## Observability
+
+rolloutd serves Prometheus metrics on an address of its own, `127.0.0.1:18102` by default, and exports traces over
+OTLP when `OTEL_EXPORTER_OTLP_ENDPOINT` is set ([ADR 0012](docs/adr/0012-observability.md)). `make obs-up` runs
+rolloutd in Compose with Prometheus, Grafana, and Jaeger alongside, all on loopback. Stop the quick start's rolloutd
+first, since this one uses the same port:
+
+```bash
+./bin/rolloutctl key generate --private-key release.key --public-key release.pub
+export ROLLOUT_ADMIN_TOKEN="$(openssl rand -hex 24)"
+make obs-up
+
+./bin/rollout-sim live --preset bad-release --devices 100 --key release.key --on-breach rollback \
+  --min-observations 10 --quiet
+```
+
+The rollout halts and rolls back within seconds. The dashboard at http://127.0.0.1:18103 then shows the halt, its
+reason, each stage's outcomes, and the rollback restoring every device that updated. Prometheus is at
+http://127.0.0.1:18104, and Jaeger, with a trace for each request and engine decision, at http://127.0.0.1:18105.
+[docs/runbooks.md](docs/runbooks.md) says what to do about each thing the dashboard can show. `make dev-reset` stops
+it all and deletes its data.
+
 ## What works today
 
 | Area | Behavior |
@@ -253,6 +275,7 @@ helm install fleet-rollout deploy/helm/fleet-rollout --namespace fleet-rollout -
 | Device agent | Polls with jitter, and downloads in verified chunks that survive a crash or a killed process. Checks the signature, platform, size, and release counter. Installs into the inactive slot only once the server agrees, and reverts if the health check fails or the install was interrupted. |
 | Kubernetes | `Fleet` and `Rollout` resources, an operator that turns them into API calls, and a Helm chart. Tested end to end on kind. |
 | Simulator | Runs fleets of the real agent with dropped and lost requests, corrupted and truncated downloads, crashes, offline devices, and reconnect storms. A seed reproduces a run exactly. |
+| Observability | Prometheus metrics for requests, shedding, reports, engine decisions, halts, and each rollout's progress. OpenTelemetry traces. A Grafana dashboard, and runbooks. |
 | Operations | Health and readiness endpoints, drain on shutdown, structured logs, and separate admin and device credentials. The server binds to loopback unless told otherwise. |
 
 [docs/rollout-semantics.md](docs/rollout-semantics.md) is the behavior contract, including what is
@@ -263,7 +286,7 @@ together, and [docs/adr](docs/adr) records the decisions.
 
 None of this exists yet.
 
-- **Operations:** metrics, traces, dashboards, and runbooks, plus scale testing of the paths built so far.
+- **Scale:** load testing the paths built so far, at fleet sizes up to 10,000 devices.
 - **Release:** published benchmarks and a full bad-release demo.
 
 Real hardware, vehicle protocols, multi-region control planes, a web UI, delta updates, and a full

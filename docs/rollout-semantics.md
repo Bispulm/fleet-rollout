@@ -162,6 +162,22 @@ stage's counters:
   same way.
 - A late success can't undo a halt. Halts are cleared by an operator, not by more data arriving.
 
+### Devices that go quiet
+
+A device that hasn't been heard from for `stale_after` counts as unknown. Unknown devices aren't failures, and
+they aren't successes:
+
+- They don't count toward a stage's failure rate. A release that bricks devices, so they never report again, isn't
+  hidden by this, because the next rule catches it.
+- More than `max_unknown_bps` of a stage, or of the rollout, unknown blocks promotion. Waiting can't pass a stage
+  whose devices have gone silent.
+- A stage that can't pass by its deadline halts with `stage_deadline`, and the detail gives the unknown count, so a
+  release that takes devices offline halts on time rather than waiting forever.
+- Polling counts as being heard from, so a device holding during a long pause doesn't turn unknown.
+
+A separate failure limit for unknown devices was considered and left out: the deadline already bounds how long
+silence can last, and treating silence as failure would halt good releases whenever part of a fleet is offline.
+
 ### Halted rollouts
 
 A halted rollout doesn't resume. The operator either rolls back or aborts, and a fresh rollout
