@@ -116,7 +116,7 @@ func (p Policy) Evaluate(e Evaluation) Verdict {
 	}
 
 	if e.SoakElapsed < spec.Soak.Std() {
-		return Verdict{Action: ActionNone, Waiting: fmt.Sprintf("soak: %s of %s", e.SoakElapsed, spec.Soak.Std())}
+		return Verdict{Action: ActionNone, Waiting: fmt.Sprintf("soak: %s of %s", e.SoakElapsed.Truncate(time.Second), spec.Soak.Std())}
 	}
 	if !unknownOK {
 		return Verdict{Action: ActionNone, Waiting: fmt.Sprintf(
