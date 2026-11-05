@@ -277,7 +277,8 @@ members already on that release are excluded from it as `already_current`.
 
 ## Artifacts and devices
 
-**Status: Specified.**
+**Status: Implemented.** The agent, `rollout-agent`, installs by copying an artifact's bytes into a slot, and
+nothing runs them.
 
 ### What a device checks
 
@@ -312,7 +313,7 @@ the expected digest.
 | What goes wrong | What the device does |
 |---|---|
 | Connection drops, or a server error | Retry from the last verified chunk, with backoff and jitter |
-| Server ignores the Range request and sends `200` | Discard the response and retry. After repeated attempts, start the download over from byte 0 |
+| Server ignores the Range request and sends `200` | Start over from byte 0 with that response, checking each chunk as it arrives |
 | A different `ETag`, offset, or total | Discard the response and count an integrity strike |
 | A chunk fails its digest | Discard the chunk and count an integrity strike |
 | Too many integrity strikes | Report `failed`, and install nothing |
@@ -323,7 +324,8 @@ off the download.
 
 ### Retries
 
-Network failures, `429`, and `5xx` are retried with exponential backoff and full jitter, respecting `Retry-After`.
+Network failures, `429`, and `5xx` are retried with exponential backoff, waiting a random time between half the current
+limit and all of it, and respecting `Retry-After`.
 Authentication, integrity, and policy failures aren't retried as if they were transient. A `401` means the device can't
 do anything useful, so it slows to its longest backoff and keeps its state.
 
@@ -344,9 +346,15 @@ active and pending slots, the previous healthy artifact, the report sequence, an
 
 ### Simulator faults
 
-The simulator injects disconnects, latency, corrupted downloads, offline intervals, crashes, unhealthy releases, duplicate
-reports, and reconnect storms. See [ADR 0008](adr/0008-step-driven-agent-and-simulator.md) for what a seed does and
+The simulator runs the real agent and injects faults only at its boundaries: dropped requests, responses lost after
+the server acted, corrupted and truncated downloads, duplicate reports, crashes at any save or during an install,
+devices offline for a while, everyone reconnecting at once, latency in live runs, and releases that fail their health
+check on a share of devices. See [ADR 0008](adr/0008-step-driven-agent-and-simulator.md) for what a seed does and
 doesn't reproduce.
+
+A crash during an install or health check counts against the release, because a release that reboots the device looks
+exactly the same. A fleet that loses power often therefore needs a failure limit above that background rate, and early
+stages big enough that one interrupted install doesn't decide them. The simulator's presets are sized that way.
 
 ## Rollback
 
