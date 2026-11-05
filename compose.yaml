@@ -1,0 +1,24 @@
+# Local development dependencies. Binds to loopback only; the credentials below
+# are for this local database and are not used anywhere else.
+name: fleet-rollout
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: rollout
+      POSTGRES_PASSWORD: rollout_dev
+      POSTGRES_DB: rollout
+    ports:
+      - "127.0.0.1:${ROLLOUT_POSTGRES_PORT:-15431}:5432"
+    volumes:
+      # The Postgres 18 image keeps its data under a versioned directory here.
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rollout -d rollout"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  postgres-data:
