@@ -66,7 +66,7 @@ wait_for() {
 }
 
 rollout_resource() {
-  local name=$1 version=$2
+  local name=$1 version=$2 on_breach=${3:-Halt}
   cat <<EOF
 apiVersion: rollouts.bispulm.github.io/v1alpha1
 kind: Rollout
@@ -79,8 +79,16 @@ spec:
     - {percent: 25, soak: 5s}
     - {percent: 50, soak: 5s}
     - {percent: 100, soak: 5s}
-  safety: {maxFailureRate: "20%"}
+  safety: {maxFailureRate: "20%", onBreach: $on_breach}
 EOF
+}
+
+# stop_fleet stops a simulated fleet and shows what it reported, so that two never run the
+# same devices at once.
+stop_fleet() {
+  kill -INT "$1"
+  wait "$1" || true
+  cat "$2"
 }
 
 step "Building the binaries and the image"
@@ -118,7 +126,7 @@ EOF
 kubectl wait fleet/lab-k8s --for=condition=Ready --timeout=60s
 "$BIN/rolloutctl" device register-synthetic --fleet lab-k8s --count 40 --platform linux/arm64 \
   --tokens-file "$WORK/tokens.txt"
-for release in 1 2; do
+for release in 1 2 3; do
   head -c 65536 /dev/urandom >"$WORK/demo-app-$release.bin"
   "$BIN/rolloutctl" artifact push --name demo-app --version "$release.0.0" --platform linux/arm64 \
     --release "$release" --file "$WORK/demo-app-$release.bin" --key "$WORK/release.key" >/dev/null
@@ -132,14 +140,13 @@ pids+=("$good_fleet")
 rollout_resource demo-app-1.0.0 1.0.0 | kubectl apply -f -
 kubectl wait rollout/demo-app-1.0.0 --for=jsonpath='{.status.phase}'=completed --timeout=300s
 kubectl get rollout demo-app-1.0.0
-kill -INT "$good_fleet"
-wait "$good_fleet" || true
-cat "$WORK/fleet-good.log"
+stop_fleet "$good_fleet" "$WORK/fleet-good.log"
 
 step "Rolling out a release that fails on every device, which has to halt"
 "$BIN/rollout-sim" fleet --tokens-file "$WORK/tokens.txt" --trust-keys "$WORK/release.pub" \
   --api "$ROLLOUT_API_URL" --preset clean --bad-release-rate 1 --initial-release 1 >"$WORK/fleet-bad.log" 2>&1 &
-pids+=($!)
+bad_fleet=$!
+pids+=("$bad_fleet")
 rollout_resource demo-app-2.0.0 2.0.0 | kubectl apply -f -
 kubectl wait rollout/demo-app-2.0.0 --for=jsonpath='{.status.phase}'=halted --timeout=180s
 kubectl get rollout demo-app-2.0.0 -o jsonpath='{.status.haltReason}: {.status.haltDetail}{"\n"}'
@@ -152,5 +159,19 @@ if ! curl -fsS -H "Authorization: Bearer $ROLLOUT_ADMIN_TOKEN" "$ROLLOUT_API_URL
   echo "the control plane hasn't aborted rollout $bad_id" >&2
   exit 1
 fi
+
+stop_fleet "$bad_fleet" "$WORK/fleet-bad.log"
+
+step "Rolling out a release that fails on half the devices, with rollback on breach"
+"$BIN/rollout-sim" fleet --tokens-file "$WORK/tokens.txt" --trust-keys "$WORK/release.pub" \
+  --api "$ROLLOUT_API_URL" --preset clean --bad-release-rate 0.5 --initial-release 1 --seed 3 \
+  >"$WORK/fleet-rollback.log" 2>&1 &
+rollback_fleet=$!
+pids+=("$rollback_fleet")
+rollout_resource demo-app-3.0.0 3.0.0 Rollback | kubectl apply -f -
+kubectl wait rollout/demo-app-3.0.0 --for=jsonpath='{.status.phase}'=rolled_back --timeout=300s
+kubectl get rollout demo-app-3.0.0 \
+  -o jsonpath='{.status.haltReason}: {.status.haltDetail}{"\n"}rolled back: {.status.rollback.restored} of {.status.rollback.needed} updated devices restored{"\n"}'
+stop_fleet "$rollback_fleet" "$WORK/fleet-rollback.log"
 
 step "Passed"
