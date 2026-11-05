@@ -74,7 +74,7 @@ func TestDirectives(t *testing.T) {
 	}{
 		{StateRunning, AssignmentAssigned, DirectiveProceed},
 		{StateSoaking, AssignmentDownloading, DirectiveProceed},
-		{StateCompleted, AssignmentDownloading, DirectiveProceed},
+		{StateCompleted, AssignmentInstalling, DirectiveProceed},
 		{StatePaused, AssignmentAssigned, DirectiveHold},
 		{StatePaused, AssignmentDownloading, DirectiveHold},
 		{StatePaused, AssignmentVerifying, DirectiveHold},

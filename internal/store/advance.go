@@ -168,6 +168,11 @@ func promote(ctx context.Context, tx pgx.Tx, r Rollout, now time.Time) (AdvanceR
 		if err != nil {
 			return AdvanceResult{}, err
 		}
+		// Coverage can be met with devices still to start. A finished rollout has nothing
+		// more to offer them, and an open assignment would keep them from a follow-up.
+		if err := supersedeUnstarted(ctx, tx, r.ID, now); err != nil {
+			return AdvanceResult{}, err
+		}
 		if _, err := tx.Exec(ctx, `UPDATE rollouts SET state = $2, revision = revision + 1, finished_at = $3 WHERE id = $1`,
 			r.ID, to, now); err != nil {
 			return AdvanceResult{}, fmt.Errorf("complete rollout: %w", err)

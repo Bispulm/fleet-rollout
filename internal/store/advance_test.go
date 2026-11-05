@@ -842,3 +842,51 @@ func TestReportsAreNotBlockedByAnEngineDecisionInProgress(t *testing.T) {
 		t.Fatalf("state = %s, want halted", got)
 	}
 }
+
+func TestCompletionCancelsWorkThatHasNotStarted(t *testing.T) {
+	e := newEngineWorld(t, 10)
+	r := e.startRollout(func(p *rollout.PolicySpec) {
+		p.Stages = []rollout.StageSpec{{Percent: 100, Soak: ptr(rollout.Duration(0))}}
+		p.Safety.RequiredCoverageBPS = ptr(8000)
+	})
+	e.finish(r.ID, rollout.AssignmentSucceeded, span(1, 8)...)
+	waitingDevice := memberAt(t, e.ctx, e.store, r.ID, 9)
+	waiting := poll(t, e.ctx, e.store, waitingDevice)
+	installingDevice := memberAt(t, e.ctx, e.store, r.ID, 10)
+	installing := poll(t, e.ctx, e.store, installingDevice)
+	mustReport(t, e.ctx, e.store, installingDevice, installing, 1, rollout.AssignmentInstalling)
+
+	e.advance(r.ID)
+	if got := e.advance(r.ID); got.To != rollout.StateCompleted {
+		t.Fatalf("result = %+v", got)
+	}
+
+	// The device that hadn't started isn't told to carry on with a finished rollout.
+	if got := poll(t, e.ctx, e.store, waitingDevice); got != nil {
+		t.Fatalf("unstarted work survived completion: %+v", got)
+	}
+	result := mustReport(t, e.ctx, e.store, waitingDevice, waiting, 1, rollout.AssignmentDownloading)
+	if result.Applied {
+		t.Fatalf("a report on cancelled work applied: %+v", result)
+	}
+
+	// The device already installing can't be recalled, so it finishes.
+	if got := poll(t, e.ctx, e.store, installingDevice); got == nil || got.Directive != rollout.DirectiveProceed {
+		t.Fatalf("in-flight device got %+v", got)
+	}
+
+	// A follow-up can reach the device whose work was cancelled.
+	followUp := e.world.newRollout(t, "follow-up")
+	followUp.Policy = mustPolicy(t, func(p *rollout.PolicySpec) {
+		p.Stages = []rollout.StageSpec{{Percent: 100}}
+	})
+	created, _, err := e.store.CreateRollout(e.ctx, "lab-a", followUp)
+	if err != nil {
+		t.Fatalf("CreateRollout: %v", err)
+	}
+	mustStart(t, e.store, created)
+	got := poll(t, e.ctx, e.store, waitingDevice)
+	if got == nil || got.RolloutID != created.ID {
+		t.Fatalf("the left-behind device got %+v, want the follow-up's assignment", got)
+	}
+}

@@ -81,8 +81,9 @@ const (
 )
 
 // DirectiveFor returns the directive for an open assignment. Only a pause holds
-// anything: a halt or abort supersedes assignments that haven't reached installation
-// in the same transaction, so any still open by then are in flight and must finish.
+// anything: halting, aborting, and completing all supersede assignments that haven't
+// reached installation in the same transaction, so any still open are in flight and
+// must finish.
 func DirectiveFor(rollout State, assignment AssignmentState) Directive {
 	if rollout == StatePaused && !assignment.InFlight() {
 		return DirectiveHold

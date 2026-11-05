@@ -221,8 +221,7 @@ Each poll returns the device's open assignment with a directive and a validity l
 |---|---|---|
 | `running`, `soaking` | `proceed`, lease renewed | `proceed`, lease renewed |
 | `paused` | `hold`, lease not renewed | `proceed`, lease renewed |
-| `completed` | `proceed`, lease renewed | `proceed`, lease renewed |
-| `halted`, `aborted`, or rolling back | Superseded, so no assignment is returned | `proceed`, to finish and report |
+| `halted`, `aborted`, `completed`, or rolling back | Superseded, so no assignment is returned | `proceed`, to finish and report |
 
 An agent must not begin installing once its lease has expired, and must poll for a fresh one first. An
 agent holding an assignment that a poll no longer returns must abandon it, unless it's already in flight.
@@ -258,8 +257,9 @@ A device can't be recalled until its next poll. When a rollout halts or aborts:
 ### Devices left over at completion
 
 A rollout completes at its required coverage, so some members may have no outcome. They aren't offered
-the release afterward. A follow-up rollout of the same artifact covers them, since members already on
-that release are excluded from it as `already_current`.
+the release afterward, and any assignment that hasn't reached installation is superseded, so it can't
+stand in the way of later work. A follow-up rollout of the same artifact covers these devices, since
+members already on that release are excluded from it as `already_current`.
 
 ## Rollback
 
