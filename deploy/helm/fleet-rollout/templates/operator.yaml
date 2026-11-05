@@ -9,7 +9,7 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "fleet-rollout.name" . }}-operator
+  name: {{ include "fleet-rollout.name" . }}-{{ .Release.Namespace }}-operator
   labels:
     {{- include "fleet-rollout.labels" . | nindent 4 }}
 rules:
@@ -29,13 +29,13 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "fleet-rollout.name" . }}-operator
+  name: {{ include "fleet-rollout.name" . }}-{{ .Release.Namespace }}-operator
   labels:
     {{- include "fleet-rollout.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ include "fleet-rollout.name" . }}-operator
+  name: {{ include "fleet-rollout.name" . }}-{{ .Release.Namespace }}-operator
 subjects:
   - kind: ServiceAccount
     name: {{ include "fleet-rollout.name" . }}-operator

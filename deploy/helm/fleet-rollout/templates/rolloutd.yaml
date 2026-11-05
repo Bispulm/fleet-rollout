@@ -73,6 +73,10 @@ metadata:
     app.kubernetes.io/component: rolloutd
 spec:
   replicas: {{ .Values.rolloutd.replicas }}
+  # The artifact volume is ReadWriteOnce, so a new pod can't start alongside the old one when
+  # they land on different nodes.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       {{- include "fleet-rollout.selector" . | nindent 6 }}

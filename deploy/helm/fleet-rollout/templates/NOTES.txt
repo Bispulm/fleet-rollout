@@ -5,3 +5,7 @@ Reach the API from this machine with:
   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "fleet-rollout.name" . }}-rolloutd {{ .Values.rolloutd.service.port }}
 
 Then create a Fleet and a Rollout resource, or use rolloutctl with ROLLOUT_ADMIN_TOKEN set.
+
+Helm installs the CRDs but never upgrades them. After upgrading the chart, apply any CRD changes with:
+
+  kubectl apply -f deploy/helm/fleet-rollout/crds
