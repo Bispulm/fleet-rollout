@@ -10,6 +10,9 @@ import (
 	"net/http"
 	"sync/atomic"
 	"time"
+
+	"github.com/Bispulm/fleet-rollout/internal/auth"
+	"github.com/Bispulm/fleet-rollout/internal/store"
 )
 
 const readinessTimeout = 2 * time.Second
@@ -17,19 +20,24 @@ const readinessTimeout = 2 * time.Second
 // ReadinessCheck reports whether the server can do useful work.
 type ReadinessCheck func(context.Context) error
 
-// Options configures a Server.
+// Options configures a Server. Admin routes are registered only when Store is set,
+// and AdminToken is required with it.
 type Options struct {
-	Logger *slog.Logger
-	Ready  ReadinessCheck
+	Logger     *slog.Logger
+	Ready      ReadinessCheck
+	Store      *store.Store
+	AdminToken string
 }
 
 // Server is the HTTP API. It is safe for concurrent use.
 type Server struct {
-	logger   *slog.Logger
-	ready    ReadinessCheck
-	mux      *http.ServeMux
-	handler  http.Handler
-	draining atomic.Bool
+	logger    *slog.Logger
+	ready     ReadinessCheck
+	store     *store.Store
+	adminAuth auth.AdminVerifier
+	mux       *http.ServeMux
+	handler   http.Handler
+	draining  atomic.Bool
 }
 
 // New builds a Server with its routes registered.
@@ -37,11 +45,16 @@ func New(opts Options) *Server {
 	s := &Server{
 		logger: opts.Logger,
 		ready:  opts.Ready,
+		store:  opts.Store,
 		mux:    http.NewServeMux(),
 	}
 	s.handler = observe(s.logger, http.HandlerFunc(s.route))
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
+	if opts.Store != nil {
+		s.adminAuth = auth.NewAdminVerifier(opts.AdminToken)
+		s.registerAdminRoutes()
+	}
 	return s
 }
 
