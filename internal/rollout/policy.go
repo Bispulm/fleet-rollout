@@ -341,7 +341,7 @@ func (p Policy) Plan(memberCount int) ([]StagePlan, error) {
 		plan[i] = StagePlan{Ordinal: i + 1, Percent: stage.Percent, Target: targets[i], CohortSize: cohort}
 		if cohort > 0 && cohort < stage.MinObservations {
 			problems.addf(fmt.Sprintf("stages[%d].min_observations", i),
-				"stage %d exposes %d new devices out of %d, below its minimum of %d observations; raise the percentage or lower the minimum",
+				"stage %d's cohort is %d of %d devices, below its minimum of %d observations; raise the percentage or lower the minimum",
 				i+1, cohort, memberCount, stage.MinObservations)
 		}
 	}
