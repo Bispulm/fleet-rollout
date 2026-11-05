@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -31,6 +32,7 @@ type Metrics struct {
 	engineDecisions *prometheus.CounterVec
 	halts           *prometheus.CounterVec
 	engineLeader    prometheus.Gauge
+	rollouts        *rolloutCollector
 }
 
 // New makes the metrics, with the Go runtime's and the process's included.
@@ -92,14 +94,25 @@ func New() *Metrics {
 	return m
 }
 
+// maxScrapes bounds the scrapes served at once. Prometheus scrapes one at a time, so more than a
+// few at once is someone else, and they get a 503.
+const maxScrapes = 4
+
 // Handler serves the metrics in Prometheus's format.
 func (m *Metrics) Handler() http.Handler {
-	return promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{})
+	return promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{MaxRequestsInFlight: maxScrapes})
 }
 
-// ObserveRollouts reports rollout state read from the store at each scrape.
-func (m *Metrics) ObserveRollouts(s *store.Store, logger *slog.Logger) {
-	m.registry.MustRegister(&rolloutCollector{store: s, logger: logger})
+// RolloutReader reads the rollouts that metrics report on. *store.Store is one.
+type RolloutReader interface {
+	RecentRollouts(ctx context.Context, window time.Duration) ([]store.Rollout, error)
+}
+
+// ObserveRollouts reports rollout state read from the store when scraped. Scrapes close together
+// share one read, so that scraping can't add load to Postgres beyond one query every few seconds.
+func (m *Metrics) ObserveRollouts(r RolloutReader, logger *slog.Logger) {
+	m.rollouts = &rolloutCollector{reader: r, logger: logger, now: time.Now}
+	m.registry.MustRegister(m.rollouts)
 }
 
 // Request counts an HTTP request. route is the pattern it matched, so paths can't add series.
@@ -152,8 +165,12 @@ func (m *Metrics) Leading(leading bool) {
 	}
 }
 
-// scrapeTimeout bounds the store reads behind one scrape.
+// scrapeTimeout bounds the store read behind a scrape.
 const scrapeTimeout = 5 * time.Second
+
+// rolloutCacheTTL is how long one read of rollout state answers scrapes. It's shorter than any
+// sensible scrape interval, so Prometheus sees fresh state, while other scrapers share its reads.
+const rolloutCacheTTL = 5 * time.Second
 
 var (
 	rolloutInfo = prometheus.NewDesc(namespace+"_rollout_info",
@@ -172,8 +189,34 @@ var (
 )
 
 type rolloutCollector struct {
-	store  *store.Store
+	reader RolloutReader
 	logger *slog.Logger
+	now    func() time.Time
+
+	// mu is held across a read, so scrapes that arrive meanwhile wait for its result instead of
+	// starting reads of their own.
+	mu       sync.Mutex
+	readAt   time.Time
+	rollouts []store.Rollout
+	err      error
+}
+
+// read returns rollout state no older than rolloutCacheTTL. A failed read is kept as long as a
+// good one, so that a struggling database isn't asked again by every scrape.
+func (c *rolloutCollector) read() ([]store.Rollout, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.readAt.IsZero() && c.now().Sub(c.readAt) < rolloutCacheTTL {
+		return c.rollouts, c.err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), scrapeTimeout)
+	defer cancel()
+	c.rollouts, c.err = c.reader.RecentRollouts(ctx, time.Hour)
+	if c.err != nil {
+		c.logger.LogAttrs(ctx, slog.LevelWarn, "read rollouts for metrics", slog.Any("error", c.err))
+	}
+	c.readAt = c.now()
+	return c.rollouts, c.err
 }
 
 func (c *rolloutCollector) Describe(ch chan<- *prometheus.Desc) {
@@ -183,11 +226,8 @@ func (c *rolloutCollector) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (c *rolloutCollector) Collect(ch chan<- prometheus.Metric) {
-	ctx, cancel := context.WithTimeout(context.Background(), scrapeTimeout)
-	defer cancel()
-	rollouts, err := c.store.RecentRollouts(ctx, time.Hour)
+	rollouts, err := c.read()
 	if err != nil {
-		c.logger.LogAttrs(ctx, slog.LevelWarn, "read rollouts for metrics", slog.Any("error", err))
 		ch <- prometheus.MustNewConstMetric(scrapeErrors, prometheus.GaugeValue, 1)
 		return
 	}

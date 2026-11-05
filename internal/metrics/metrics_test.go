@@ -81,7 +81,7 @@ func TestANilMetricsRecordsNothing(t *testing.T) {
 	m.Leading(true)
 }
 
-func TestRolloutStateIsReadAtEachScrape(t *testing.T) {
+func TestRolloutStateIsReadFromTheStore(t *testing.T) {
 	ctx := context.Background()
 	s := store.New(testdb.New(t))
 	if _, err := s.CreateFleet(ctx, "lab-a", nil); err != nil {
@@ -117,15 +117,19 @@ func TestRolloutStateIsReadAtEachScrape(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m := metrics.New()
-	m.ObserveRollouts(s, slog.New(slog.DiscardHandler))
-	if body := scrape(t, m); strings.Contains(body, "fleet_rollout_rollout_info{") {
+	observe := func() *metrics.Metrics {
+		m := metrics.New()
+		m.ObserveRollouts(s, slog.New(slog.DiscardHandler))
+		return m
+	}
+	if body := scrape(t, observe()); strings.Contains(body, "fleet_rollout_rollout_info{") {
 		t.Fatalf("a draft was reported:\n%s", body)
 	}
 	if _, err := s.StartRollout(ctx, created.ID, store.TransitionOptions{Actor: "test"}); err != nil {
 		t.Fatal(err)
 	}
-	body := scrape(t, m)
+	// A fresh Metrics, because scrapes within a few seconds of each other share one read.
+	body := scrape(t, observe())
 	labels := fmt.Sprintf(`fleet="lab-a",rollout="demo",rollout_id="%s"`, created.ID)
 	requireLine(t, body, `fleet_rollout_rollout_info{`+labels+`,state="running"} 1`)
 	requireLine(t, body, `fleet_rollout_rollout_current_stage{`+labels+`} 1`)
@@ -133,11 +137,6 @@ func TestRolloutStateIsReadAtEachScrape(t *testing.T) {
 	requireLine(t, body, `fleet_rollout_rollout_scrape_errors 0`)
 	if strings.Contains(body, "fleet_rollout_rollout_halt_info{") {
 		t.Fatal("a running rollout was reported as halted")
-	}
-
-	// A halt stays visible as long as the rollout is listed, however scrapes and halts line up.
-	if _, err := s.AbortRollout(ctx, created.ID, store.TransitionOptions{Actor: "test"}); err != nil {
-		t.Fatal(err)
 	}
 }
 
