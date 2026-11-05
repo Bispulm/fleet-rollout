@@ -79,6 +79,12 @@ type Rollout struct {
 	FinishedAt   *time.Time
 	Stages       []Stage
 	Exclusions   map[rollout.ExclusionReason]int
+	// HaltReason and HaltDetail say why a rollout halted, if it did.
+	HaltReason *string
+	HaltDetail *string
+	// Waiting explains what an active rollout needs before it can move on, using the
+	// same evaluation the engine decides with.
+	Waiting string
 }
 
 // CreateRollout creates a draft. It rejects a policy that the fleet's currently
@@ -225,12 +231,12 @@ func readRollout(ctx context.Context, tx pgx.Tx, id string, now time.Time) (Roll
 	err := tx.QueryRow(ctx, `
 		SELECT r.fleet_id, f.name, r.artifact_id, r.name, r.state, r.revision, r.policy, r.policy_digest,
 		       r.current_stage, r.member_count, r.paused_from, r.paused_at,
-		       r.created_at, r.started_at, r.finished_at
+		       r.created_at, r.started_at, r.finished_at, r.halt_reason, r.halt_detail
 		FROM rollouts r JOIN fleets f ON f.id = r.fleet_id
 		WHERE r.id = $1`, id).Scan(
 		&r.FleetID, &r.FleetName, &r.ArtifactID, &r.Name, &r.State, &r.Revision, &r.Policy, &digest,
 		&r.CurrentStage, &r.MemberCount, &r.PausedFrom, &r.PausedAt,
-		&r.CreatedAt, &r.StartedAt, &r.FinishedAt)
+		&r.CreatedAt, &r.StartedAt, &r.FinishedAt, &r.HaltReason, &r.HaltDetail)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Rollout{}, notFound("rollout", id)
 	}
@@ -264,6 +270,10 @@ func readRollout(ctx context.Context, tx pgx.Tx, id string, now time.Time) (Roll
 		staleBefore := now.Add(-r.Policy.Safety.StaleAfter.Std())
 		if err := readOutcomes(ctx, tx, id, *r.CurrentStage, staleBefore, r.Stages); err != nil {
 			return Rollout{}, err
+		}
+		switch r.State {
+		case rollout.StateRunning, rollout.StateSoaking, rollout.StatePaused:
+			r.Waiting = r.Policy.Evaluate(r.evaluation(now)).Waiting
 		}
 	}
 
