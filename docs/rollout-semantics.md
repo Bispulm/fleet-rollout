@@ -14,8 +14,12 @@ status, since the semantics were settled before all of the code that enforces th
 | Stage | A step that raises exposure to a cumulative percentage of members |
 | Cohort | The members newly exposed by a stage |
 | Observed | A cohort device with a terminal outcome, `succeeded` or `failed` |
-| Unknown | A cohort device with no terminal outcome and no report within `stale_after` |
-| Pending | A cohort device with no terminal outcome that has reported recently or isn't stale yet |
+| Unknown | A cohort device with no terminal outcome that hasn't been heard from, by poll or report, within `stale_after` |
+| Pending | A cohort device with no terminal outcome that has been heard from recently |
+| In flight | A device past the point where it can be recalled: `installing`, `health_check`, or `reverting` |
+
+Unknown is computed when it's needed, from `last_seen_at` and the stage's start time, and never stored.
+There's nothing to keep in sync, and a device that comes back stops being unknown immediately.
 
 ## Membership
 
@@ -75,7 +79,7 @@ the frozen membership. A rollout that passes both can't get stuck on sample size
 
 ## Stage progression
 
-**Status: Specified,** except where a subsection says otherwise. The engine isn't built yet.
+**Status: Implemented.**
 
 All comparisons use integer arithmetic on basis points, where 10,000 is 100%, so there is no
 floating-point rounding at a boundary.
@@ -103,10 +107,12 @@ The engine halts the rollout when any of these is true, while it's running, soak
 1. **Observed breach:** `observed >= min_observations` and the rate breaches.
 2. **Certain breach:** `failed * 10000 > max_failure_bps * cohort`. The stage would breach even if
    every remaining device succeeded, so waiting adds exposure and no information.
-3. **Rollout-wide breach:** the same comparison across every exposed cohort, using
-   `rollout_max_failure_bps`.
+3. **Rollout-wide breach:** the same rate comparison across every exposed cohort, using
+   `rollout_max_failure_bps`. It applies once the total observed reaches the current stage's
+   `min_observations`, so a single early failure can't bypass the sample size the operator chose.
 4. **Late regression:** a stage that already passed now breaches on its current counters.
 5. **Deadline:** the stage's deadline has passed and the coverage gate or the unknown gate isn't met.
+   This one doesn't apply while paused, because the deadline clock is stopped.
 
 ### Coverage and soak
 
@@ -137,13 +143,12 @@ device has time to be classified as unknown before the deadline applies.
 
 ### Pause
 
-**Status: Implemented** for the clocks. Evaluating safety during a pause is **Specified**.
-
 Pause stops the soak and deadline clocks. On resume, the deadline moves later by the length of the
 pause, so a pause can't make a stage time out by itself. Safety checks keep running during a pause,
 so a breach moves the rollout from `paused` to `halted`.
 
-Pausing prevents new forward assignments atomically (see "Exposure already in flight").
+Pausing prevents new forward assignments atomically, and tells devices that haven't started installing to
+hold. Devices already installing finish.
 
 ### Late reports
 
@@ -162,9 +167,7 @@ part of the rollout's record.
 
 ## States and transitions
 
-**Status: Implemented** for start, pause, resume, and abort, including row locking, revision checks,
-and the audit log. Events driven by the engine or by rollback are **Specified**: the table allows them,
-but nothing issues them yet.
+**Status: Implemented,** except for the rollback events, which the table allows but nothing issues yet.
 
 | From | Event | To |
 |---|---|---|
@@ -191,29 +194,77 @@ and any revision the caller supplied, bumps the revision, and appends an audit r
 
 ## Assignments and reports
 
-**Status: Specified.** The schema's uniqueness and append-only rules are implemented and tested, but
-no code issues assignments or accepts reports yet.
+**Status: Implemented,** except that the agent's side of the lease arrives with the agent.
 
-- A device has at most one open assignment, across all rollouts.
-- Each assignment has a generation and an expiry. Pause, halt, and rollback stop new forward
-  assignments in the same transaction that changes rollout state.
-- Reports are bound to the authenticated device, rollout, assignment generation, and a sequence
-  number the agent persists.
-- An identical repeat of a report is acknowledged and changes nothing. A different payload with an
-  already-used sequence is rejected.
-- A report for an old generation is recorded in the event log and can't overwrite a newer decision
-  or count twice toward an outcome.
+### Issuing
+
+A device gets a forward assignment when it polls, if all of these hold in that transaction:
+
+1. Its fleet has a rollout that is `running` or `soaking`.
+2. It's a member whose stage is at or before the current stage.
+3. Its status is `active`. A device excluded after the rollout started stays a member, but gets no new
+   work, so it's counted as pending or unknown and isn't dropped from the denominator.
+4. It has no open assignment, and no earlier forward assignment in this rollout.
+
+The poll takes a shared lock on the rollout row, so it serializes with pause, halt, and abort: once one
+of those commits, no new forward assignment can be issued. A device has at most one open assignment
+across all rollouts, and at most one forward assignment per rollout, both enforced by unique indexes.
+A device that polls twice at once gets the same assignment both times.
+
+A decommissioned device can't authenticate at all.
+
+### Directives and the validity lease
+
+Each poll returns the device's open assignment with a directive and a validity lease, `expires_at`.
+
+| Rollout state | Assignment not yet installing | Assignment in flight |
+|---|---|---|
+| `running`, `soaking` | `proceed`, lease renewed | `proceed`, lease renewed |
+| `paused` | `hold`, lease not renewed | `proceed`, lease renewed |
+| `completed` | `proceed`, lease renewed | `proceed`, lease renewed |
+| `halted`, `aborted`, or rolling back | Superseded, so no assignment is returned | `proceed`, to finish and report |
+
+An agent must not begin installing once its lease has expired, and must poll for a fresh one first. An
+agent holding an assignment that a poll no longer returns must abandon it, unless it's already in flight.
+
+### Reports
+
+- A report names its rollout, assignment, generation, and a sequence number the agent persists. The
+  assignment must belong to the authenticated device. Anything else is treated as not found.
+- An identical repeat of a report is acknowledged and changes nothing.
+- A different report with an already-used sequence is rejected as a conflict.
+- Every new report is recorded in the append-only event log, whether or not it's applied, with the reason
+  it was ignored if it wasn't.
+- A report is ignored, not rejected, if its assignment has already finished, if a later sequence has
+  already been applied, or if it isn't a valid progression. So a delayed report can't overwrite a newer
+  decision, and can't count twice, since outcomes come from one row per device.
+- Progress only moves forward, and may skip steps. `succeeded` requires having reached `health_check`, so
+  a device can't claim success without having checked. `failed` is allowed from any open state.
+- Stage counts are derived from assignments at evaluation time. There are no counters that could drift
+  from them, and nothing in memory to lose on restart.
 
 ### Exposure already in flight
 
-A device that has fetched an assignment can't be recalled until its next poll. Pause and halt
-therefore can't undo in-flight work: those devices may still finish installing. Forward exposure
-after a halt is bounded by the assignments already issued, and the status API will report that count
-so nobody has to guess.
+A device can't be recalled until its next poll. When a rollout halts or aborts:
+
+1. No new forward assignment can be issued, from that transaction onward.
+2. Open assignments that haven't started installing are superseded in the same transaction. A report
+   from one afterward is recorded and ignored.
+3. A device that has lost contact stops before installing when its lease expires, so the time during
+   which a halted rollout can still gain new installs is bounded by the lease length.
+4. Installs already in flight run to completion and report. That exposure is unavoidable, and status
+   shows the count for each stage.
+
+### Devices left over at completion
+
+A rollout completes at its required coverage, so some members may have no outcome. They aren't offered
+the release afterward. A follow-up rollout of the same artifact covers them, since members already on
+that release are excluded from it as `already_current`.
 
 ## Rollback
 
-**Status: Specified.**
+**Status: Specified.** Until it's built, a policy with `on_breach: rollback` is rejected at creation rather
+than accepted and silently treated as a halt.
 
 An authorized rollback tells each exposed device to restore the healthy version it recorded before
 this rollout. It doesn't disable downgrade protection in general: the authorization is scoped to one
