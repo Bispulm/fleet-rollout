@@ -18,6 +18,7 @@ import (
 	"github.com/Bispulm/fleet-rollout/internal/api"
 	"github.com/Bispulm/fleet-rollout/internal/config"
 	"github.com/Bispulm/fleet-rollout/internal/db"
+	"github.com/Bispulm/fleet-rollout/internal/store"
 )
 
 const (
@@ -87,8 +88,10 @@ func runMigrate(ctx context.Context, pool *pgxpool.Pool, stdout io.Writer) error
 
 func runServe(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, e env) error {
 	server := api.New(api.Options{
-		Logger: logger,
-		Ready:  func(ctx context.Context) error { return db.CheckReady(ctx, pool) },
+		Logger:     logger,
+		Ready:      func(ctx context.Context) error { return db.CheckReady(ctx, pool) },
+		Store:      store.New(pool),
+		AdminToken: cfg.AdminToken,
 	})
 
 	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", cfg.ListenAddr)
