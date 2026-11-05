@@ -226,8 +226,9 @@ Each poll returns the device's open assignment with a directive and a validity l
 | `paused` | `hold`, lease not renewed | `proceed`, lease renewed |
 | `halted`, `aborted`, `completed`, or rolling back | Superseded, so no assignment is returned | `proceed`, to finish and report |
 
-An agent must not begin installing once its lease has expired, and must poll for a fresh one first. An
-agent holding an assignment that a poll no longer returns must abandon it, unless it's already in flight.
+An agent starts installing only once the server has accepted its report of `installing`, as described under
+Reports and in [ADR 0009](adr/0009-installs-need-the-servers-agreement.md). An agent holding an assignment that a
+poll no longer returns must abandon it, unless it's already in flight.
 
 ### Reports
 
@@ -260,8 +261,8 @@ A device can't be recalled until its next poll. When a rollout halts or aborts:
 1. No new forward assignment can be issued, from that transaction onward.
 2. Open assignments that haven't started installing are superseded in the same transaction. A report
    from one afterward is recorded and ignored.
-3. A device that has lost contact stops before installing when its lease expires, so the time during
-   which a halted rollout can still gain new installs is bounded by the lease length.
+3. A device can't start installing until the server accepts its request, and from that transaction onward
+   the server refuses. So a halted rollout gains no new installs, however long a device was out of contact.
 4. Installs already in flight run to completion and report. That exposure is unavoidable, and status
    shows the count for each stage.
 
@@ -287,6 +288,18 @@ installs nothing.
 4. Every chunk's digest as it arrives, and the full digest at the end.
 5. Downgrade protection: the release counter must be above what's running. If it's equal and the digest matches,
    the device already has this release, and reports success without reinstalling. Anything else is rejected.
+
+### Starting to install
+
+Once everything checks out, the device asks the server's permission by reporting `installing`, after any earlier
+reports have been delivered. It saves the request first, so a retry is identical.
+
+| Answer | What the device does |
+|---|---|
+| Applied, or a duplicate of one that was applied | Install |
+| Ignored as `on_hold` | Keep the verified download, hold until a poll says proceed, then ask again with a new report |
+| Ignored as finished, or a permanent error | Abandon the assignment and install nothing |
+| No answer | Wait and send the same request again, for as long as it takes |
 
 ### Downloads
 
@@ -325,6 +338,7 @@ active and pending slots, the previous healthy artifact, the report sequence, an
 | Reverting | Finish reverting |
 | After recording success | The new slot is active. Send any reports still outstanding |
 | Between sending a report and recording that it was acknowledged | Send it again. The server treats it as a duplicate |
+| Between asking to install and recording the answer | Ask again with the same request. The server answers a duplicate with what became of the first, so the device installs only if it was accepted |
 
 ### Simulator faults
 

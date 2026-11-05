@@ -133,7 +133,7 @@ flowchart LR
     CP --> OBS[Metrics and traces]
 ```
 
-- **Agent.** Polls with jitter ([ADR 0002](adr/0002-pull-based-device-model.md)), resumes downloads from verified data, and persists a checkpoint at each step, so a crash during installation is recoverable.
+- **Agent.** Polls with jitter ([ADR 0002](adr/0002-pull-based-device-model.md)), resumes downloads from verified data, and persists a checkpoint at each step, so a crash during installation is recoverable. It starts installing only once the server accepts its request ([ADR 0009](adr/0009-installs-need-the-servers-agreement.md)), so the server always knows who is in flight.
 - **Simulator.** Runs the same agent state machine, replacing only transport, installation, and time.
 - **Operator.** Calls the same API as the CLI and holds no rollout rules of its own.
 

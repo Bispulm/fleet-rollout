@@ -1,6 +1,6 @@
 # ADR 0006: Assignment leases, and outcomes derived from assignments
 
-Status: Accepted
+Status: Accepted. The validity lease is superseded by [ADR 0009](0009-installs-need-the-servers-agreement.md).
 
 ## Context
 

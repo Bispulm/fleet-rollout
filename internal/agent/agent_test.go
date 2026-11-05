@@ -53,6 +53,15 @@ type fakeServer struct {
 	reportErr    error
 	manifestErr  error
 	loseResponse int // Accept this many reports, then act as though they failed.
+	// paused refuses requests to start installing, and tells devices to hold.
+	paused bool
+	// supersedeAfterPoll cancels the assignment just after a poll has returned it, as a halt
+	// landing between a device's poll and its next request would.
+	supersedeAfterPoll bool
+	// outcomes records what became of each sequence, for answering duplicates, and sent
+	// what was first sent with it, for refusing a different report under the same number.
+	outcomes map[int64]apiv1.ReportResponse
+	sent     map[int64]apiv1.ReportRequest
 
 	// fetch, if set, replaces normal serving of a Range request.
 	fetch func(offset, length int64) (client.RangeResponse, error)
@@ -66,7 +75,13 @@ func (s *fakeServer) Poll(context.Context) (apiv1.PollResponse, error) {
 	resp := apiv1.PollResponse{PollAfterSeconds: int(testPoll / time.Second)}
 	if s.assignment != nil {
 		copied := *s.assignment
+		if s.paused && !copied.State.InFlight() {
+			copied.Directive = rollout.DirectiveHold
+		}
 		resp.Assignment = &copied
+		if s.supersedeAfterPoll {
+			s.assignment = nil
+		}
 	}
 	return resp, nil
 }
@@ -76,18 +91,52 @@ func (s *fakeServer) Report(_ context.Context, r apiv1.ReportRequest) (apiv1.Rep
 		return apiv1.ReportResponse{}, s.reportErr
 	}
 	s.reports = append(s.reports, r)
+	resp, seen := s.outcomes[r.Sequence]
+	switch {
+	case seen && s.sent[r.Sequence] != r:
+		return apiv1.ReportResponse{}, &client.APIError{Problem: apiv1.Problem{Status: http.StatusConflict, Code: apiv1.CodeReportConflict}}
+	case seen:
+		resp.Duplicate = true
+	default:
+		resp = s.decide(r)
+		if s.outcomes == nil {
+			s.outcomes, s.sent = map[int64]apiv1.ReportResponse{}, map[int64]apiv1.ReportRequest{}
+		}
+		s.outcomes[r.Sequence], s.sent[r.Sequence] = resp, r
+	}
 	if s.loseResponse > 0 {
 		s.loseResponse--
 		return apiv1.ReportResponse{}, errors.New("connection lost before the response")
 	}
-	// The server's view follows the reports, and a terminal one finishes the assignment.
-	if s.assignment != nil && s.assignment.ID == r.AssignmentID {
-		s.assignment.State = r.State
-		if r.State.IsTerminal() {
-			s.assignment = nil
+	return resp, nil
+}
+
+// decide applies a report the way the real server does. Its view follows the reports, a
+// terminal one finishes the assignment, and a device may not start installing while paused.
+func (s *fakeServer) decide(r apiv1.ReportRequest) apiv1.ReportResponse {
+	a := s.assignment
+	switch {
+	case a == nil || a.ID != r.AssignmentID:
+		return apiv1.ReportResponse{IgnoredReason: rollout.IgnoredAssignmentFinished}
+	case r.State.InFlight() && !a.State.InFlight() && s.paused:
+		return apiv1.ReportResponse{IgnoredReason: rollout.IgnoredOnHold}
+	}
+	a.State = r.State
+	if r.State.IsTerminal() {
+		s.assignment = nil
+	}
+	return apiv1.ReportResponse{Applied: true}
+}
+
+// accepted returns the states of the reports the server applied, in order.
+func (s *fakeServer) accepted() []rollout.AssignmentState {
+	var out []rollout.AssignmentState
+	for _, r := range s.reports {
+		if resp := s.outcomes[r.Sequence]; resp.Applied && !slices.Contains(out, r.State) {
+			out = append(out, r.State)
 		}
 	}
-	return apiv1.ReportResponse{Applied: true}, nil
+	return out
 }
 
 func (s *fakeServer) Manifest(context.Context, string) (signing.Envelope, error) {
@@ -763,44 +812,67 @@ func TestANewAssignmentReplacesOneThatDisappeared(t *testing.T) {
 	}
 }
 
-func TestNoInstallStartsAfterTheLeaseExpiresWithoutContact(t *testing.T) {
-	f := newFixture(t)
-	f.runUntil("ready to install", func() bool {
+func atPhase(f *fixture, phase agent.Phase) func() bool {
+	return func() bool {
 		work := f.agent.Checkpoint().Work
-		return work != nil && work.Phase == agent.PhaseVerifying
-	})
-	// Contact is lost, and enough time passes for the lease to run out.
+		return work != nil && work.Phase == phase
+	}
+}
+
+func TestNoInstallStartsWithoutTheServersAgreement(t *testing.T) {
+	f := newFixture(t)
+	f.runUntil("ready to install", atPhase(f, agent.PhaseReady))
+	// However long contact is lost, the device can't start, because only the server can
+	// say the rollout is still going.
 	f.server.pollErr = errors.New("network unreachable")
 	f.server.reportErr = errors.New("network unreachable")
-	f.clock.now = f.clock.now.Add(testLease + time.Second)
+	for range 50 {
+		f.step()
+	}
+	f.clock.now = f.clock.now.Add(24 * time.Hour)
 	for range 50 {
 		f.step()
 	}
 	if f.installer.Installs() != 0 {
-		t.Fatal("it started installing with an expired lease")
+		t.Fatal("it started installing without the server's agreement")
 	}
 	if phase := f.agent.Checkpoint().Work.Phase; phase != agent.PhaseReady {
 		t.Fatalf("phase = %s, want it waiting at ready", phase)
 	}
 
-	// Contact comes back, and a fresh poll renews the lease.
 	f.server.pollErr, f.server.reportErr = nil, nil
 	f.runToIdle()
 	if f.installer.Installs() != 1 {
 		t.Fatalf("installs = %d", f.installer.Installs())
 	}
-	if got := f.server.last(); got.State != rollout.AssignmentSucceeded {
-		t.Fatalf("last report = %+v", got)
+	if got := f.server.accepted(); !slices.Equal(got, healthyPath) {
+		t.Fatalf("accepted = %v, want %v", got, healthyPath)
 	}
 }
 
-func TestAHaltDuringTheLeaseStopsTheInstallAtTheLastPoll(t *testing.T) {
+func TestAHaltBetweenThePollAndTheInstallStopsIt(t *testing.T) {
 	f := newFixture(t)
-	f.runUntil("verifying", func() bool {
-		work := f.agent.Checkpoint().Work
-		return work != nil && work.Phase == agent.PhaseVerifying
-	})
-	// The lease is still valid, but the assignment has been cancelled in the meantime.
+	f.runUntil("ready to install", atPhase(f, agent.PhaseReady))
+	// The device's next poll still hears proceed, and the halt lands just after.
+	f.server.supersedeAfterPoll = true
+	f.clock.now = f.clock.now.Add(2 * testPoll)
+	f.runUntil("abandoned", func() bool { return f.agent.Checkpoint().Work == nil })
+
+	if f.installer.Installs() != 0 {
+		t.Fatal("it installed something the server had cancelled")
+	}
+	if f.partials.Exists("artifact-1") {
+		t.Fatal("the partial download wasn't deleted")
+	}
+	last := f.server.last()
+	if last.State != rollout.AssignmentInstalling || f.server.outcomes[last.Sequence].IgnoredReason != rollout.IgnoredAssignmentFinished {
+		t.Fatalf("last report = %+v, %+v; want a refused request to install", last, f.server.outcomes[last.Sequence])
+	}
+}
+
+func TestAHaltBeforeTheInstallStartsStopsIt(t *testing.T) {
+	f := newFixture(t)
+	f.runUntil("verifying", atPhase(f, agent.PhaseVerifying))
 	f.server.assignment = nil
 	f.runUntil("abandoned", func() bool { return f.agent.Checkpoint().Work == nil })
 	if f.installer.Installs() != 0 {
@@ -808,15 +880,74 @@ func TestAHaltDuringTheLeaseStopsTheInstallAtTheLastPoll(t *testing.T) {
 	}
 }
 
-func TestAnInstallCanProceedOnAValidLeaseWithoutContact(t *testing.T) {
+func TestARefusalOnHoldWaitsAndAsksAgainWithANewReport(t *testing.T) {
 	f := newFixture(t)
-	f.runUntil("verifying", func() bool {
-		work := f.agent.Checkpoint().Work
-		return work != nil && work.Phase == agent.PhaseVerifying
+	f.runUntil("ready to install", atPhase(f, agent.PhaseReady))
+	// The rollout is paused after the device's last poll, so it still thinks it may go ahead.
+	f.server.paused = true
+	f.runUntil("refused", func() bool {
+		last := f.server.last()
+		return last.State == rollout.AssignmentInstalling && f.server.outcomes[last.Sequence].IgnoredReason == rollout.IgnoredOnHold
 	})
-	f.server.pollErr = errors.New("network unreachable")
-	f.server.reportErr = errors.New("network unreachable")
-	f.runUntil("installed", func() bool { return f.installer.Installs() == 1 })
+	// It keeps the verified download, and waits.
+	if work := f.agent.Checkpoint().Work; work == nil || !work.Held || work.Phase != agent.PhaseReady {
+		t.Fatalf("work after the refusal = %+v, want it held at ready", work)
+	}
+	f.clock.now = f.clock.now.Add(3 * testPoll)
+	for range 20 {
+		f.step()
+	}
+	if f.installer.Installs() != 0 {
+		t.Fatal("installed during a pause")
+	}
+
+	f.server.paused = false
+	f.runToIdle()
+	if f.installer.Installs() != 1 {
+		t.Fatalf("installs = %d after resuming", f.installer.Installs())
+	}
+	var requests []int64
+	for _, report := range f.server.reports {
+		if report.State == rollout.AssignmentInstalling && !slices.Contains(requests, report.Sequence) {
+			requests = append(requests, report.Sequence)
+		}
+	}
+	// The refused request is on the server's record as refused, so asking again needs a new one.
+	if len(requests) != 2 {
+		t.Fatalf("requests to install used sequences %v, want two different ones", requests)
+	}
+	if f.server.bytesServed != int64(len(f.server.content)) {
+		t.Fatalf("downloaded %d bytes of %d, so the pause cost it the download", f.server.bytesServed, len(f.server.content))
+	}
+}
+
+func TestARequestToInstallIsSavedBeforeItsSent(t *testing.T) {
+	f := newFixture(t)
+	f.runUntil("ready to install", atPhase(f, agent.PhaseReady))
+	// The request reaches the server, and the answer is lost.
+	f.server.loseResponse = 1
+	f.step()
+	if !slices.Contains(f.server.states(), rollout.AssignmentInstalling) {
+		t.Fatalf("reports = %v, want a request to install", f.server.states())
+	}
+	// It restarts before trying again, and can no longer trust the release. Whatever it
+	// reports now mustn't reuse the number the server already has.
+	f.config.Trust = signingtest.Trust(t, signingtest.NewKey(t))
+	f.restart()
+	f.runUntil("given up", func() bool {
+		cp := f.agent.Checkpoint()
+		return cp.Work == nil && len(cp.Outbox) == 0
+	})
+	if f.installer.Installs() != 0 {
+		t.Fatal("installed a release it can't trust")
+	}
+	// The server heard the failure, rather than refusing it as a reused number.
+	if f.server.assignment != nil {
+		t.Fatalf("the server still thinks the device is %s; reports = %+v", f.server.assignment.State, f.server.reports)
+	}
+	if got := f.server.last(); got.State != rollout.AssignmentFailed || got.Reason != agent.ReasonInvalidSignature {
+		t.Fatalf("last report = %+v", got)
+	}
 }
 
 func TestInFlightWorkFinishesWithoutTheNetwork(t *testing.T) {
@@ -889,9 +1020,9 @@ func TestReportsThatLoseTheirResponseAreSentAgainIdentically(t *testing.T) {
 func TestReportsStayInOrderAcrossFailures(t *testing.T) {
 	f := newFixture(t)
 	f.server.reportErr = errors.New("network unreachable")
-	f.runUntil("work done and waiting", func() bool {
+	f.runUntil("verified, with reports waiting", func() bool {
 		cp := f.agent.Checkpoint()
-		return cp.Work == nil && len(cp.Outbox) == len(healthyPath)
+		return cp.Work != nil && cp.Work.Phase == agent.PhaseReady && len(cp.Outbox) == 2
 	})
 	f.server.reportErr = nil
 	f.runToIdle()
@@ -900,13 +1031,19 @@ func TestReportsStayInOrderAcrossFailures(t *testing.T) {
 	}
 }
 
-func TestPermanentReportFailuresAreDroppedSoTheyCantBlockEverything(t *testing.T) {
+func TestPermanentReportFailuresAreDroppedAndStopAnInstall(t *testing.T) {
 	f := newFixture(t)
 	f.server.reportErr = &client.APIError{Problem: apiv1.Problem{Status: http.StatusConflict, Code: apiv1.CodeReportConflict}}
-	f.runUntil("installed, with nothing left to send", func() bool {
+	// Ordinary reports are dropped rather than retried forever, so they can't block anything.
+	// A request to install that's refused for good means the install doesn't happen.
+	f.runUntil("given up, with nothing left to send", func() bool {
 		cp := f.agent.Checkpoint()
-		return f.installer.Installs() == 1 && cp.Work == nil && len(cp.Outbox) == 0
+		// Downloading, verifying, and the request to install.
+		return cp.Work == nil && len(cp.Outbox) == 0 && cp.Sequence >= 3
 	})
+	if f.installer.Installs() != 0 {
+		t.Fatal("installed after the server refused it")
+	}
 }
 
 func TestTransportFailuresBackOffAndRecover(t *testing.T) {
@@ -1165,6 +1302,9 @@ func assertConsistentOutcome(t *testing.T, f *fixture, target int, boundary stri
 		seen[report.Sequence] = report
 	}
 
+	if f.installer.Installs() > 0 && !slices.Contains(f.server.accepted(), rollout.AssignmentInstalling) {
+		t.Fatalf("%s: installed without the server accepting it: %v", label, f.server.accepted())
+	}
 	last := f.server.last()
 	switch last.State {
 	case rollout.AssignmentSucceeded:

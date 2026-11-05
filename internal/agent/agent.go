@@ -162,9 +162,10 @@ type Work struct {
 	Strikes int `json:"strikes"`
 	// Held means the server said to wait.
 	Held bool `json:"held"`
-	// LeaseDeadline is when permission to start installing runs out.
-	LeaseDeadline time.Time `json:"lease_deadline"`
-	PendingSlot   string    `json:"pending_slot,omitempty"`
+	// Claim is the report of installing that asks the server for permission to start. It's
+	// saved before it's sent, so that a retry is identical and counts as a duplicate.
+	Claim       *apiv1.ReportRequest `json:"claim,omitempty"`
+	PendingSlot string               `json:"pending_slot,omitempty"`
 	// FailReason says why a revert is happening.
 	FailReason string `json:"fail_reason,omitempty"`
 }
@@ -192,13 +193,15 @@ func (c Checkpoint) clone() Checkpoint {
 	}
 	if c.Work != nil {
 		work := *c.Work
+		if c.Work.Claim != nil {
+			claim := *c.Work.Claim
+			work.Claim = &claim
+		}
 		out.Work = &work
 	}
 	return out
 }
 
-// enqueue allocates the next sequence for a report. The caller saves the result before
-// acting on it, so a report always exists for anything that happened.
 // awaitingDelivery reports whether the outbox holds a report about an assignment.
 func (c Checkpoint) awaitingDelivery(assignmentID string) bool {
 	for _, report := range c.Outbox {
@@ -209,16 +212,23 @@ func (c Checkpoint) awaitingDelivery(assignmentID string) bool {
 	return false
 }
 
-func (c *Checkpoint) enqueue(rolloutID, assignmentID string, generation int64, state rollout.AssignmentState, reason string) {
+// report allocates the next sequence for a report.
+func (c *Checkpoint) report(rolloutID, assignmentID string, generation int64, state rollout.AssignmentState, reason string) apiv1.ReportRequest {
 	c.Sequence++
-	c.Outbox = append(c.Outbox, apiv1.ReportRequest{
+	return apiv1.ReportRequest{
 		Sequence:     c.Sequence,
 		RolloutID:    rolloutID,
 		AssignmentID: assignmentID,
 		Generation:   generation,
 		State:        state,
 		Reason:       reason,
-	})
+	}
+}
+
+// enqueue adds a report to the outbox. The caller saves the result before acting on it, so
+// a report always exists for anything that happened.
+func (c *Checkpoint) enqueue(rolloutID, assignmentID string, generation int64, state rollout.AssignmentState, reason string) {
+	c.Outbox = append(c.Outbox, c.report(rolloutID, assignmentID, generation, state, reason))
 }
 
 // Agent runs one device. It isn't safe for concurrent use.
@@ -373,14 +383,12 @@ func (a *Agent) Step(ctx context.Context) (time.Duration, error) {
 		}
 	}
 
-	// Installing is the last chance to find out that a rollout has stopped, so a device
-	// always asks first, however recently it last polled.
-	if work := a.cp.Work; !now.Before(a.nextPoll) || (work != nil && work.Phase == PhaseReady) {
+	if !now.Before(a.nextPoll) {
 		wait, err := a.poll(ctx, now)
 		if err != nil {
 			return 0, err
 		}
-		if wait > 0 && !a.mayInstallWithoutContact(now) {
+		if wait > 0 {
 			return a.soonest(now, wait), nil
 		}
 	}
@@ -397,7 +405,7 @@ func (a *Agent) Step(ctx context.Context) (time.Duration, error) {
 	case PhaseVerifying:
 		return 0, a.stepVerify()
 	case PhaseReady:
-		return 0, a.beginInstall()
+		return a.stepClaim(ctx, now)
 	default:
 		return 0, fmt.Errorf("unexpected phase %q", work.Phase)
 	}
@@ -409,13 +417,6 @@ func (a *Agent) soonest(now time.Time, wait time.Duration) time.Duration {
 		return wait
 	}
 	return min(wait, max(a.nextFlush.Sub(now), 0))
-}
-
-// mayInstallWithoutContact allows a fully verified release to go ahead while the server is
-// unreachable, but only while the lease it was last given is still valid.
-func (a *Agent) mayInstallWithoutContact(now time.Time) bool {
-	work := a.cp.Work
-	return work != nil && work.Phase == PhaseReady && !work.Held && now.Before(work.LeaseDeadline)
 }
 
 func (a *Agent) untilNextPoll(now time.Time) time.Duration {
@@ -479,11 +480,11 @@ func (a *Agent) poll(ctx context.Context, now time.Time) (time.Duration, error) 
 		a.pollInterval = time.Duration(resp.PollAfterSeconds) * time.Second
 	}
 	a.nextPoll = now.Add(retry.Jitter(a.pollInterval, pollJitterFraction, a.deps.Rand))
-	return 0, a.applyPoll(resp.Assignment, now)
+	return 0, a.applyPoll(resp.Assignment)
 }
 
 // applyPoll reconciles what the server said with the work in progress.
-func (a *Agent) applyPoll(assignment *apiv1.DeviceAssignment, now time.Time) error {
+func (a *Agent) applyPoll(assignment *apiv1.DeviceAssignment) error {
 	work := a.cp.Work
 	if work != nil && (assignment == nil || assignment.ID != work.AssignmentID) {
 		// The server has cancelled it. This can only be work that hasn't reached
@@ -502,19 +503,20 @@ func (a *Agent) applyPoll(assignment *apiv1.DeviceAssignment, now time.Time) err
 		return nil
 	}
 	if work == nil {
-		return a.startWork(*assignment, now)
+		return a.startWork(*assignment)
 	}
 
-	next := a.cp.clone()
-	next.Work.Held = assignment.Directive == rollout.DirectiveHold
-	if !next.Work.Held {
-		next.Work.LeaseDeadline = now.Add(time.Duration(assignment.LeaseSeconds) * time.Second)
+	held := assignment.Directive == rollout.DirectiveHold
+	if held == work.Held {
+		return nil
 	}
+	next := a.cp.clone()
+	next.Work.Held = held
 	return a.commit(next)
 }
 
 // startWork takes on a new assignment, unless the device can already tell it's unacceptable.
-func (a *Agent) startWork(assignment apiv1.DeviceAssignment, now time.Time) error {
+func (a *Agent) startWork(assignment apiv1.DeviceAssignment) error {
 	artifact := assignment.Artifact
 	next := a.cp.clone()
 	reject := func(reason string) error {
@@ -542,13 +544,12 @@ func (a *Agent) startWork(assignment apiv1.DeviceAssignment, now time.Time) erro
 		return reject(ReasonDowngrade)
 	}
 	next.Work = &Work{
-		AssignmentID:  assignment.ID,
-		RolloutID:     assignment.RolloutID,
-		Generation:    assignment.Generation,
-		Artifact:      artifact,
-		Phase:         PhaseManifest,
-		Held:          assignment.Directive == rollout.DirectiveHold,
-		LeaseDeadline: now.Add(time.Duration(assignment.LeaseSeconds) * time.Second),
+		AssignmentID: assignment.ID,
+		RolloutID:    assignment.RolloutID,
+		Generation:   assignment.Generation,
+		Artifact:     artifact,
+		Phase:        PhaseManifest,
+		Held:         assignment.Directive == rollout.DirectiveHold,
 	}
 	return a.commit(next)
 }
@@ -809,14 +810,63 @@ func (a *Agent) stepVerify() error {
 	return a.commit(next)
 }
 
-// beginInstall crosses the point of no return. It's saved first, so that if the agent
-// doesn't survive what comes next, the restart knows the new slot can't be trusted.
-func (a *Agent) beginInstall() error {
+// stepClaim asks the server for permission to start installing, by reporting installing.
+// The server decides that against the rollout as it stands, so nothing starts once a halt,
+// an abort, or a pause has committed, and the server always knows who is in flight. Without
+// an answer the device waits, however long that takes. Earlier reports go first, so that the
+// server hears them in order.
+func (a *Agent) stepClaim(ctx context.Context, now time.Time) (time.Duration, error) {
+	if len(a.cp.Outbox) > 0 {
+		return a.soonest(now, a.untilNextPoll(now)), nil
+	}
 	work := a.cp.Work
+	if work.Claim == nil {
+		next := a.cp.clone()
+		claim := next.report(work.RolloutID, work.AssignmentID, work.Generation, rollout.AssignmentInstalling, "")
+		next.Work.Claim = &claim
+		if err := a.commit(next); err != nil {
+			return 0, err
+		}
+		work = a.cp.Work
+	}
+
+	resp, err := a.deps.Transport.Report(ctx, *work.Claim)
+	switch {
+	case err == nil && resp.Applied:
+		// A duplicate says what became of the original, so this holds after a lost response.
+		a.failures = 0
+		return 0, a.beginInstall()
+	case err == nil && resp.IgnoredReason == rollout.IgnoredOnHold:
+		// The server has this request on record as refused, so the next one has to be new.
+		a.failures = 0
+		next := a.cp.clone()
+		next.Work.Claim = nil
+		next.Work.Held = true
+		return a.untilNextPoll(now), a.commit(next)
+	case err == nil:
+		// The assignment is over, as far as the server is concerned.
+		a.failures = 0
+		a.deps.Logger.LogAttrs(ctx, slog.LevelInfo, "install refused, abandoning the assignment",
+			slog.String("device_id", a.config.DeviceID), slog.String("reason", resp.IgnoredReason))
+		return 0, a.abandonWork()
+	case client.IsRetryable(err) || client.IsStatus(err, http.StatusUnauthorized):
+		return a.networkFailure(err), nil
+	default:
+		// Retrying can't help, and without the server's agreement there's no going ahead.
+		a.deps.Logger.LogAttrs(ctx, slog.LevelWarn, "install refused for good, abandoning the assignment",
+			slog.String("device_id", a.config.DeviceID), slog.Any("error", err))
+		return 0, a.abandonWork()
+	}
+}
+
+// beginInstall crosses the point of no return, once the server has agreed. It's saved first,
+// so that if the agent doesn't survive what comes next, the restart knows the new slot can't
+// be trusted.
+func (a *Agent) beginInstall() error {
 	next := a.cp.clone()
 	next.Work.Phase = PhaseInstalling
 	next.Work.PendingSlot = otherSlot(a.cp.ActiveSlot)
-	next.enqueue(work.RolloutID, work.AssignmentID, work.Generation, rollout.AssignmentInstalling, "")
+	next.Work.Claim = nil
 	return a.commit(next)
 }
 
@@ -829,13 +879,6 @@ func otherSlot(slot string) string {
 
 func (a *Agent) stepInstall(ctx context.Context) error {
 	work := a.cp.Work
-	// Telling the server is worth trying, because it decides what counts as in flight. It
-	// doesn't hold anything up, though, since the install has to go ahead regardless.
-	if now := a.deps.Clock.Now(); len(a.cp.Outbox) > 0 && !now.Before(a.nextFlush) {
-		if err := a.flush(ctx, now); err != nil {
-			return err
-		}
-	}
 	content, err := a.deps.Partials.Open(work.Artifact.ID)
 	if err != nil {
 		return fmt.Errorf("open partial download: %w", err)
