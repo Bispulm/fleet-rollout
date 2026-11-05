@@ -187,8 +187,16 @@ func advanceRollback(ctx context.Context, tx pgx.Tx, r Rollout, now time.Time) (
 	return AdvanceResult{Event: event, To: to, Detail: detail}, true, nil
 }
 
-// rollbackWaiting says what a rollback is waiting for.
-func rollbackWaiting(p RollbackProgress) string {
+// rollbackWaiting says what a rollback is waiting for or, once it ran out of time, what to do next.
+func rollbackWaiting(state rollout.State, p RollbackProgress) string {
+	if state == rollout.StateRollbackIncomplete {
+		failed := ""
+		if p.Failed > 0 {
+			failed = fmt.Sprintf(", %d failed", p.Failed)
+		}
+		return fmt.Sprintf("rollback incomplete: %d of %d devices restored%s, %d unresolved at the deadline; "+
+			"roll back again, or abort", p.Restored, p.Needed, failed, p.Unresolved)
+	}
 	if p.ForwardInFlight > 0 && p.Unresolved == 0 {
 		return fmt.Sprintf("rollback: %d installs still finishing before they can be rolled back", p.ForwardInFlight)
 	}

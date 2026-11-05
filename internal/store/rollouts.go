@@ -295,8 +295,9 @@ func readRollout(ctx context.Context, tx pgx.Tx, id string, now time.Time) (Roll
 		if r.Rollback, err = readRollback(ctx, tx, id, rollbackAttempt, rollbackDeadline); err != nil {
 			return Rollout{}, err
 		}
-		if r.State == rollout.StateRollingBack {
-			r.Waiting = rollbackWaiting(*r.Rollback)
+		switch r.State {
+		case rollout.StateRollingBack, rollout.StateRollbackIncomplete:
+			r.Waiting = rollbackWaiting(r.State, *r.Rollback)
 		}
 	}
 

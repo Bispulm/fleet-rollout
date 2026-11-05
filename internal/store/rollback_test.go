@@ -160,6 +160,9 @@ func TestARollbackPastItsDeadlineIsIncompleteAndCanBeTriedAgain(t *testing.T) {
 	if incomplete.Rollback.Needed != 2 || incomplete.Rollback.Restored != 1 || incomplete.Rollback.Unresolved != 1 {
 		t.Fatalf("rollback = %+v, want one device unresolved", incomplete.Rollback)
 	}
+	if want := "rollback incomplete: 1 of 2 devices restored, 1 unresolved at the deadline; roll back again, or abort"; incomplete.Waiting != want {
+		t.Fatalf("waiting = %q, want %q", incomplete.Waiting, want)
+	}
 	if a := poll(t, e.ctx, e.store, slow); a != nil {
 		t.Fatalf("an expired rollback is still offered: %+v", a)
 	}
