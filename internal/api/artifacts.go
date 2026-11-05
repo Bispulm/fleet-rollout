@@ -38,11 +38,12 @@ func (s *Server) handleCreateArtifact(w http.ResponseWriter, r *http.Request) er
 		Platform:       req.Platform,
 		ReleaseCounter: req.ReleaseCounter,
 		SizeBytes:      req.SizeBytes,
+		ChunkSize:      1 << 20,
 	}
 	if _, err := hex.Decode(artifact.SHA256[:], []byte(req.SHA256)); err != nil {
 		return invalid("sha256", "must be 64 lowercase hex characters")
 	}
-	created, err := s.store.RegisterArtifact(r.Context(), artifact)
+	created, _, err := s.store.RegisterArtifact(r.Context(), artifact)
 	if err != nil {
 		return err
 	}

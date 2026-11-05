@@ -106,6 +106,29 @@ func TestArtifactsAreUniqueAndImmutable(t *testing.T) {
 
 	_, err = f.pool.Exec(ctx, `UPDATE artifacts SET size_bytes = 2 WHERE id = $1`, f.artifact)
 	requireSQLState(t, err, sqlRestrictViolation)
+	_, err = f.pool.Exec(ctx, `DELETE FROM artifacts WHERE id = $1`, f.artifact)
+	requireSQLState(t, err, sqlRestrictViolation)
+}
+
+func TestArtifactContentCanBeRecordedOnlyOnce(t *testing.T) {
+	ctx := testContext(t)
+	f := newFixture(t, ctx)
+	var id string
+	mustScan(t, f.pool.QueryRow(ctx, `INSERT INTO artifacts (name, version, platform, release_counter, size_bytes, sha256)
+		VALUES ('other', '1.0.0', 'linux/arm64', 1, 1, $1) RETURNING id`, make([]byte, 32)), &id)
+
+	// Content needs an envelope, so nothing can be marked ready without a signed manifest.
+	_, err := f.pool.Exec(ctx, `UPDATE artifacts SET content_ready_at = now() WHERE id = $1`, id)
+	requireSQLState(t, err, sqlCheckViolation)
+
+	var signed string
+	mustScan(t, f.pool.QueryRow(ctx, `INSERT INTO artifacts (name, version, platform, release_counter, size_bytes, sha256, envelope, chunk_size)
+		VALUES ('other', '2.0.0', 'linux/arm64', 2, 1, $1, '{}', 1024) RETURNING id`, make([]byte, 32)), &signed)
+	mustExec(t, ctx, f.pool, `UPDATE artifacts SET content_ready_at = now() WHERE id = $1`, signed)
+	_, err = f.pool.Exec(ctx, `UPDATE artifacts SET content_ready_at = now() - interval '1 day' WHERE id = $1`, signed)
+	requireSQLState(t, err, sqlRestrictViolation)
+	_, err = f.pool.Exec(ctx, `UPDATE artifacts SET envelope = 'x' WHERE id = $1`, signed)
+	requireSQLState(t, err, sqlRestrictViolation)
 }
 
 func TestRolloutPolicyAndIdentityAreImmutable(t *testing.T) {
