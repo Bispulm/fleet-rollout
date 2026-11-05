@@ -175,6 +175,7 @@ func (e *Engine) advance(ctx context.Context, id string) bool {
 			attribute.String("detail", result.Detail)))
 		if result.RolledBack {
 			e.metrics.Decision(string(rollout.EventRollback), "")
+			span.AddEvent(string(rollout.EventRollback))
 		}
 		e.logger.LogAttrs(ctx, slog.LevelInfo, "rollout changed",
 			slog.String("rollout_id", id),

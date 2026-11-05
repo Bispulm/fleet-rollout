@@ -15,6 +15,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/Bispulm/fleet-rollout/internal/rollout"
 	"github.com/Bispulm/fleet-rollout/internal/store"
 )
 
@@ -70,6 +71,24 @@ func New() *Metrics {
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		m.httpRequests, m.httpDuration, m.shed, m.reports, m.engineDecisions, m.halts, m.engineLeader,
 	)
+	// A labeled counter appears only once it's first counted, so its first sample is already 1, and
+	// increase() never sees that first event. Starting the known ones at zero fixes that, so the very
+	// first halt on a new server shows up.
+	for _, pool := range []string{"requests", "downloads"} {
+		m.shed.WithLabelValues(pool)
+	}
+	for _, reason := range []rollout.HaltReason{
+		rollout.HaltStageBreach, rollout.HaltCertainBreach, rollout.HaltRolloutBreach, rollout.HaltLateRegression,
+		rollout.HaltDeadline,
+	} {
+		m.halts.WithLabelValues(string(reason))
+	}
+	for _, event := range []rollout.Event{
+		rollout.EventCoverageMet, rollout.EventSoakPassed, rollout.EventFinalSoakPassed, rollout.EventBreach,
+		rollout.EventRollback, rollout.EventRollbackDone, rollout.EventRollbackExpired,
+	} {
+		m.engineDecisions.WithLabelValues(string(event))
+	}
 	return m
 }
 

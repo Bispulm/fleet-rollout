@@ -61,6 +61,17 @@ func TestEventsAreCounted(t *testing.T) {
 	}
 }
 
+func TestKnownCountersStartAtZero(t *testing.T) {
+	body := scrape(t, metrics.New())
+	for _, line := range []string{
+		`fleet_rollout_rollout_halts_total{reason="certain_breach"} 0`,
+		`fleet_rollout_engine_decisions_total{event="rollback_done"} 0`,
+		`fleet_rollout_device_requests_shed_total{pool="downloads"} 0`,
+	} {
+		requireLine(t, body, line)
+	}
+}
+
 func TestANilMetricsRecordsNothing(t *testing.T) {
 	var m *metrics.Metrics
 	m.Request("x", "GET", 200, time.Second)
