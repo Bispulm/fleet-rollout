@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/Bispulm/fleet-rollout/internal/api"
 	"github.com/Bispulm/fleet-rollout/internal/apiv1"
+	"github.com/Bispulm/fleet-rollout/internal/artifactstore"
 	"github.com/Bispulm/fleet-rollout/internal/rollout"
 )
 
@@ -26,7 +28,13 @@ type deviceFixture struct {
 
 func newDeviceFixture(t *testing.T) deviceFixture {
 	t.Helper()
-	h := newHarness(t)
+	return newDeviceFixtureWith(t, nil)
+}
+
+// newDeviceFixtureWith lets a test change the server's options.
+func newDeviceFixtureWith(t *testing.T, edit func(*api.Options)) deviceFixture {
+	t.Helper()
+	h := newHarnessWith(t, edit)
 	h.createFleet("lab-a")
 	devices := h.registerDevices("lab-a", 20)
 	tokens := make(map[string]string, len(devices))
@@ -368,4 +376,72 @@ func TestDeviceRequestsBeyondTheLimitAreShedWithRetryAfter(t *testing.T) {
 
 	// Admin requests don't compete with devices for slots.
 	h.expect(http.StatusOK, http.MethodGet, "/v1/fleets/lab-a", nil, nil)
+}
+
+// gatedStore holds every Open until release is closed, so a download can be kept in progress.
+type gatedStore struct {
+	artifactstore.Store
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (g *gatedStore) Open(ctx context.Context, id string) (artifactstore.Object, error) {
+	g.entered <- struct{}{}
+	select {
+	case <-g.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return g.Store.Open(ctx, id)
+}
+
+func TestDownloadsDontTakeTheSlotsPollsAndReportsNeed(t *testing.T) {
+	gate := &gatedStore{entered: make(chan struct{}, 4), release: make(chan struct{})}
+	f := newDeviceFixtureWith(t, func(o *api.Options) {
+		o.MaxDeviceRequests = 1
+		o.MaxDeviceDownloads = 1
+		gate.Store = o.Artifacts
+		o.Artifacts = gate
+	})
+	a := f.poll(f.first).Assignment
+	content := "/v1/device/artifacts/" + a.Artifact.ID + "/content"
+
+	downloaded := make(chan int, 1)
+	go func() {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, f.base+content, http.NoBody)
+		if err != nil {
+			downloaded <- 0
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+f.first)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			downloaded <- 0
+			return
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		downloaded <- resp.StatusCode
+	}()
+	select {
+	case <-gate.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the download never started")
+	}
+
+	// A download in progress leaves room for a device to poll, and to report.
+	f.poll(f.second)
+	if status, raw := f.report(f.first, reportFor(a, 1, rollout.AssignmentDownloading)); status != http.StatusOK {
+		t.Fatalf("report during a download: status = %d, body: %s", status, raw)
+	}
+	// Another download waits for a download slot.
+	got, raw := f.deviceGet(f.first, content, "", "")
+	if got.StatusCode != http.StatusServiceUnavailable || !strings.Contains(string(raw), apiv1.CodeOverloaded) {
+		t.Fatalf("second download: status = %d, body: %s", got.StatusCode, raw)
+	}
+
+	close(gate.release)
+	if status := <-downloaded; status != http.StatusOK {
+		t.Fatalf("first download: status = %d", status)
+	}
 }

@@ -210,18 +210,20 @@ func TestLoadArtifactLimit(t *testing.T) {
 	}
 }
 
-func TestLoadDeviceRequestLimit(t *testing.T) {
+func TestLoadDeviceLimits(t *testing.T) {
 	cfg, err := Load(env(nil))
-	if err != nil || cfg.MaxDeviceRequests != 256 {
-		t.Fatalf("default = %d, err = %v", cfg.MaxDeviceRequests, err)
+	if err != nil || cfg.MaxDeviceRequests != 256 || cfg.MaxDeviceDownloads != 128 {
+		t.Fatalf("defaults = %d, %d, err = %v", cfg.MaxDeviceRequests, cfg.MaxDeviceDownloads, err)
 	}
-	cfg, err = Load(env(map[string]string{"ROLLOUTD_MAX_DEVICE_REQUESTS": "32"}))
-	if err != nil || cfg.MaxDeviceRequests != 32 {
-		t.Fatalf("configured = %d, err = %v", cfg.MaxDeviceRequests, err)
+	cfg, err = Load(env(map[string]string{"ROLLOUTD_MAX_DEVICE_REQUESTS": "32", "ROLLOUTD_MAX_DEVICE_DOWNLOADS": "8"}))
+	if err != nil || cfg.MaxDeviceRequests != 32 || cfg.MaxDeviceDownloads != 8 {
+		t.Fatalf("configured = %d, %d, err = %v", cfg.MaxDeviceRequests, cfg.MaxDeviceDownloads, err)
 	}
-	for _, bad := range []string{"0", "-5", "many"} {
-		if _, err := Load(env(map[string]string{"ROLLOUTD_MAX_DEVICE_REQUESTS": bad})); err == nil {
-			t.Errorf("accepted %q", bad)
+	for _, name := range []string{"ROLLOUTD_MAX_DEVICE_REQUESTS", "ROLLOUTD_MAX_DEVICE_DOWNLOADS"} {
+		for _, bad := range []string{"0", "-5", "many"} {
+			if _, err := Load(env(map[string]string{name: bad})); err == nil {
+				t.Errorf("%s: accepted %q", name, bad)
+			}
 		}
 	}
 }

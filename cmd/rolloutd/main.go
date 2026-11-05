@@ -107,15 +107,16 @@ func runServe(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger
 
 	st := store.New(pool)
 	server := api.New(api.Options{
-		Logger:            logger,
-		Ready:             func(ctx context.Context) error { return db.CheckReady(ctx, pool) },
-		Store:             st,
-		AdminToken:        cfg.AdminToken,
-		PollInterval:      cfg.PollInterval,
-		Trust:             trust,
-		Artifacts:         artifacts,
-		MaxArtifactBytes:  cfg.MaxArtifactBytes,
-		MaxDeviceRequests: cfg.MaxDeviceRequests,
+		Logger:             logger,
+		Ready:              func(ctx context.Context) error { return db.CheckReady(ctx, pool) },
+		Store:              st,
+		AdminToken:         cfg.AdminToken,
+		PollInterval:       cfg.PollInterval,
+		Trust:              trust,
+		Artifacts:          artifacts,
+		MaxArtifactBytes:   cfg.MaxArtifactBytes,
+		MaxDeviceRequests:  cfg.MaxDeviceRequests,
+		MaxDeviceDownloads: cfg.MaxDeviceDownloads,
 	})
 
 	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", cfg.ListenAddr)

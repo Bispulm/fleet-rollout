@@ -22,6 +22,8 @@ const (
 	// defaultMaxDeviceRequests is comfortably more than the connection pool, so database
 	// connections are what actually queue, and only briefly.
 	defaultMaxDeviceRequests = 256
+	// defaultMaxDeviceDownloads allows plenty of downloads at once, each one chunk long.
+	defaultMaxDeviceDownloads = 128
 	// Shed requests are told to come back after a random 1 to 5 seconds, so they don't all
 	// come back at the same moment.
 	minRetryAfterSeconds    = 1
@@ -35,12 +37,21 @@ type deviceHandlerFunc func(http.ResponseWriter, *http.Request, store.Device) er
 // device wraps a handler with device authentication and a request deadline. It's
 // separate from admin authentication, and neither credential works on the other's routes.
 func (s *Server) device(next deviceHandlerFunc) http.Handler {
+	return s.deviceWithSlots(s.deviceSlots, next)
+}
+
+// deviceDownload is device for artifact downloads, which take slots from their own pool.
+func (s *Server) deviceDownload(next deviceHandlerFunc) http.Handler {
+	return s.deviceWithSlots(s.downloadSlots, next)
+}
+
+func (s *Server) deviceWithSlots(slots chan struct{}, next deviceHandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Taking a slot comes before anything that costs a database query, so that a
 		// reconnecting fleet can't queue more work than the server can take on.
 		select {
-		case s.deviceSlots <- struct{}{}:
-			defer func() { <-s.deviceSlots }()
+		case slots <- struct{}{}:
+			defer func() { <-slots }()
 		default:
 			w.Header().Set("Retry-After", strconv.Itoa(minRetryAfterSeconds+rand.IntN(retryAfterSpreadSeconds))) //nolint:gosec // Jitter, not security.
 			writeProblemDocument(w, apiv1.Problem{

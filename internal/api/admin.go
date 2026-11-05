@@ -70,7 +70,7 @@ func (s *Server) registerAdminRoutes() {
 	s.mux.Handle("POST /v1/device/poll", s.device(s.handleDevicePoll))
 	s.mux.Handle("POST /v1/device/reports", s.device(s.handleDeviceReport))
 	s.mux.Handle("GET /v1/device/artifacts/{id}/manifest", s.device(s.handleDeviceManifest))
-	s.mux.Handle("GET /v1/device/artifacts/{id}/content", s.device(s.handleDeviceContent))
+	s.mux.Handle("GET /v1/device/artifacts/{id}/content", s.deviceDownload(s.handleDeviceContent))
 }
 
 // decodeJSON reads an admin request body.

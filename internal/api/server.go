@@ -37,9 +37,13 @@ type Options struct {
 	Artifacts artifactstore.Store
 	// MaxArtifactBytes is the largest artifact accepted.
 	MaxArtifactBytes int64
-	// MaxDeviceRequests bounds how many device requests are served at once. More than
-	// that are turned away with a time to retry, rather than queued.
+	// MaxDeviceRequests bounds how many device polls, reports, and manifest fetches are
+	// served at once. More than that are turned away with a time to retry, rather than
+	// queued.
 	MaxDeviceRequests int
+	// MaxDeviceDownloads bounds artifact downloads in the same way, separately, so that slow
+	// downloads can't crowd out the reports of devices already installing.
+	MaxDeviceDownloads int
 }
 
 // Server is the HTTP API. It is safe for concurrent use.
@@ -57,6 +61,7 @@ type Server struct {
 	artifacts        artifactstore.Store
 	maxArtifactBytes int64
 	deviceSlots      chan struct{}
+	downloadSlots    chan struct{}
 }
 
 // New builds a Server with its routes registered.
@@ -80,6 +85,11 @@ func New(opts Options) *Server {
 		slots = defaultMaxDeviceRequests
 	}
 	s.deviceSlots = make(chan struct{}, slots)
+	downloads := opts.MaxDeviceDownloads
+	if downloads == 0 {
+		downloads = defaultMaxDeviceDownloads
+	}
+	s.downloadSlots = make(chan struct{}, downloads)
 	if s.pollInterval == 0 {
 		s.pollInterval = defaultPollInterval
 	}

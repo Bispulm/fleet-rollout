@@ -21,6 +21,8 @@ const (
 	defaultPollInterval      = time.Minute
 	defaultMaxArtifactBytes  = 1 << 30
 	defaultMaxDeviceRequests = 256
+	// Downloads hold their slot while a chunk streams, so they get a pool of their own.
+	defaultMaxDeviceDownloads = 128
 	// A slow tick or two shouldn't cost the engine its lease.
 	minLeaseTTLIntervals = 3
 )
@@ -35,10 +37,11 @@ type Config struct {
 	DBMaxConns      int32
 
 	// TrustKeysFile lists the public keys allowed to sign artifacts.
-	TrustKeysFile     string
-	ArtifactDir       string
-	MaxArtifactBytes  int64
-	MaxDeviceRequests int
+	TrustKeysFile      string
+	ArtifactDir        string
+	MaxArtifactBytes   int64
+	MaxDeviceRequests  int
+	MaxDeviceDownloads int
 
 	EngineEnabled  bool
 	EngineInterval time.Duration
@@ -127,13 +130,22 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 	}
 
-	cfg.MaxDeviceRequests = defaultMaxDeviceRequests
-	if v := getenv("ROLLOUTD_MAX_DEVICE_REQUESTS"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 1 {
-			problems = append(problems, fmt.Errorf("ROLLOUTD_MAX_DEVICE_REQUESTS: %q is not a positive integer", v))
-		} else {
-			cfg.MaxDeviceRequests = n
+	for _, limit := range []struct {
+		name string
+		dst  *int
+		def  int
+	}{
+		{"ROLLOUTD_MAX_DEVICE_REQUESTS", &cfg.MaxDeviceRequests, defaultMaxDeviceRequests},
+		{"ROLLOUTD_MAX_DEVICE_DOWNLOADS", &cfg.MaxDeviceDownloads, defaultMaxDeviceDownloads},
+	} {
+		*limit.dst = limit.def
+		if v := getenv(limit.name); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 1 {
+				problems = append(problems, fmt.Errorf("%s: %q is not a positive integer", limit.name, v))
+			} else {
+				*limit.dst = n
+			}
 		}
 	}
 
