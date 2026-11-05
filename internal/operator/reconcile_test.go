@@ -418,3 +418,18 @@ func TestAControlPlaneThatCantBeReachedIsRetried(t *testing.T) {
 		t.Fatalf("condition = %+v", c)
 	}
 }
+
+func TestARolloutCanRollBackOnBreach(t *testing.T) {
+	w := newWorld(t)
+	w.fleetWithDevices("lab-a", 10)
+	w.push("1.4.0", 14)
+	res := rolloutResource("demo", "lab-a", "1.4.0")
+	res.Spec.Safety.OnBreach = "Rollback"
+	w.create(res)
+	w.reconcileRollout(res.Name)
+
+	cp, err := w.api.GetRollout(w.ctx, string(res.UID))
+	if err != nil || cp.Policy.Safety.OnBreach != rollout.OnBreachRollback {
+		t.Fatalf("control plane policy = %+v, %v", cp.Policy.Safety, err)
+	}
+}

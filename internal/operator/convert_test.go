@@ -102,4 +102,17 @@ func TestStatusMirrorsTheControlPlane(t *testing.T) {
 	if len(got.Stages) != 1 || *got.Stages[0].Cohort != 10 || got.Stages[0].Failed != 2 || got.Stages[0].Unknown != 1 {
 		t.Fatalf("stages = %+v", got.Stages)
 	}
+	if got.Rollback != nil {
+		t.Fatalf("rollback = %+v before any rollback", got.Rollback)
+	}
+
+	deadline := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	rolling := statusFrom(apiv1.Rollout{State: rollout.StateRollingBack, Rollback: &apiv1.RollbackProgress{
+		Attempt: 2, DeadlineAt: &deadline, Needed: 7, Restored: 5, Failed: 1, Unresolved: 2,
+	}})
+	rb := rolling.Rollback
+	if rb == nil || rb.Attempt != 2 || rb.Needed != 7 || rb.Restored != 5 || rb.Failed != 1 || rb.Unresolved != 2 ||
+		!rb.Deadline.Time.Equal(deadline) {
+		t.Fatalf("rollback = %+v", rb)
+	}
 }

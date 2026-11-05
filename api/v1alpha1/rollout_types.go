@@ -110,6 +110,18 @@ type StageStatus struct {
 	Unknown   int  `json:"unknown"`
 }
 
+// RollbackStatus is how far a rollback has got. Needed counts devices whose install succeeded,
+// Restored those that have confirmed a rollback, and Unresolved the rest.
+type RollbackStatus struct {
+	Attempt int `json:"attempt"`
+	// +optional
+	Deadline   *metav1.Time `json:"deadline,omitempty"`
+	Needed     int          `json:"needed"`
+	Restored   int          `json:"restored"`
+	Failed     int          `json:"failed"`
+	Unresolved int          `json:"unresolved"`
+}
+
 // RolloutStatus is what the control plane reports about the rollout.
 type RolloutStatus struct {
 	// ObservedGeneration is the generation this status describes.
@@ -137,6 +149,9 @@ type RolloutStatus struct {
 	HaltDetail string `json:"haltDetail,omitempty"`
 	// +optional
 	Stages []StageStatus `json:"stages,omitempty"`
+	// Rollback is how far a rollback has got, once one has started.
+	// +optional
+	Rollback *RollbackStatus `json:"rollback,omitempty"`
 	// Conditions report whether the rollout exists in the control plane, and anything stopping it.
 	// +optional
 	// +listType=map
