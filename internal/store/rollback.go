@@ -17,7 +17,8 @@ type RollbackProgress struct {
 	// Attempt+1.
 	Attempt    int
 	DeadlineAt *time.Time
-	// Needed counts members whose forward install succeeded, so they run the release.
+	// Needed counts members whose forward install succeeded, so they run the release, leaving out
+	// decommissioned devices, which can't take part.
 	Needed int
 	// Restored counts those that have confirmed a rollback.
 	Restored int
@@ -144,7 +145,9 @@ func readRollback(ctx context.Context, tx pgx.Tx, id string, attempt int, deadli
 		        AND b.kind = 'rollback' AND b.generation = $2 AND b.state IN ('installing', 'health_check', 'reverting'))),
 		  count(*) FILTER (WHERE f.state IN ('installing', 'health_check', 'reverting'))
 		FROM assignments f
-		WHERE f.rollout_id = $1 AND f.kind = 'forward'`, id, attempt+1).Scan(
+		JOIN devices d ON d.id = f.device_id
+		-- A decommissioned device can't poll, so it can never confirm a rollback.
+		WHERE f.rollout_id = $1 AND f.kind = 'forward' AND d.status <> 'decommissioned'`, id, attempt+1).Scan(
 		&p.Needed, &p.Restored, &p.Failed, &p.InFlight, &p.ForwardInFlight)
 	if err != nil {
 		return nil, fmt.Errorf("query rollback progress: %w", err)

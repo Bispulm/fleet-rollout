@@ -235,3 +235,19 @@ func TestARollbackStopsDevicesThatHaventStartedInstalling(t *testing.T) {
 		t.Fatalf("a request to install after the rollback started = %+v, want it refused", got)
 	}
 }
+
+func TestADecommissionedDeviceDoesntHoldUpARollback(t *testing.T) {
+	e := newRollbackWorld(t)
+	r := e.startRollout(nil)
+	e.finish(r.ID, rollout.AssignmentSucceeded, 1, 2)
+	// It can never poll again, so it can never confirm a rollback.
+	if _, err := e.store.SetDeviceStatus(e.ctx, memberAt(t, e.ctx, e.store, r.ID, 2), rollout.DeviceDecommissioned); err != nil {
+		t.Fatal(err)
+	}
+	e.rollback(r.ID)
+	e.restore(r.ID, 1, 3)
+	got := e.advance(r.ID)
+	if got.To != rollout.StateRolledBack {
+		t.Fatalf("advance = %+v, rollback = %+v; want rolled back without the decommissioned device", got, e.get(r.ID).Rollback)
+	}
+}

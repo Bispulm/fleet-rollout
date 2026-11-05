@@ -57,5 +57,7 @@ Alternatives considered:
   they do or an operator aborts.
 - Devices that failed their forward install already reverted, and devices never reached never changed, so neither
   is offered a rollback.
+- Rollouts that started before rollback existed have no recorded release to restore, since migration 00010 couldn't
+  know it. Abort those, rather than rolling them back.
 - A device can only roll back to the release immediately before. A device that installed a later release through a
   different rollout before this rollback reaches it has nothing to restore for this rollout, and reports that.

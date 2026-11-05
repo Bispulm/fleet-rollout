@@ -402,7 +402,8 @@ rollback:
 
 Each member records the release it ran when membership froze. A member needs a rollback if its forward assignment
 succeeded. A device whose forward assignment is still in flight finishes first, and then needs one if it succeeded.
-Devices that failed already reverted, and devices never reached never changed.
+Devices that failed already reverted, and devices never reached never changed. A decommissioned device can't poll,
+so it can't take part, and isn't counted.
 
 A device that needs a rollback gets a rollback assignment when it polls: kind `rollback`, with the release to restore,
 and a generation of one more than the attempt number, so the first attempt uses generation 2. A rollback assignment
