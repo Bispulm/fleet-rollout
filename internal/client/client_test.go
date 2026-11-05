@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -190,5 +192,54 @@ func TestFetchRangeTurnsErrorsIntoTypedOnes(t *testing.T) {
 	_, err := client.NewDevice(srv.URL, "t", srv.Client()).FetchRange(t.Context(), "a1", 0, 10)
 	if !client.IsCode(err, apiv1.CodeNoOpenAssignment) {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+// endless serves a JSON string that never ends, as a hostile server could.
+type endless struct{ started bool }
+
+func (e *endless) Read(p []byte) (int, error) {
+	if !e.started {
+		e.started = true
+		return copy(p, `{"payload":"`), nil
+	}
+	for i := range p {
+		p[i] = 'a'
+	}
+	return len(p), nil
+}
+
+func TestADeviceDoesntBufferAnEndlessResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.Copy(w, &endless{})
+	}))
+	defer srv.Close()
+	device := client.NewDevice(srv.URL, "token", nil)
+
+	if _, err := device.Manifest(t.Context(), "11111111-1111-4111-8111-111111111111"); err == nil || !strings.Contains(err.Error(), "larger than") {
+		t.Fatalf("Manifest error = %v, want one about the size", err)
+	}
+	if _, err := device.Poll(t.Context()); err == nil || !strings.Contains(err.Error(), "larger than") {
+		t.Fatalf("Poll error = %v, want one about the size", err)
+	}
+}
+
+func TestAManifestIsParsedStrictly(t *testing.T) {
+	for name, body := range map[string]string{
+		"unknown field":   `{"payloadType":"x","payload":"","signatures":[],"extra":1}`,
+		"trailing data":   `{"payloadType":"x","payload":"","signatures":[]} {}`,
+		"not an envelope": `[]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, body)
+			}))
+			defer srv.Close()
+			if _, err := client.NewDevice(srv.URL, "token", nil).Manifest(t.Context(), "11111111-1111-4111-8111-111111111111"); err == nil {
+				t.Fatalf("accepted %s", body)
+			}
+		})
 	}
 }

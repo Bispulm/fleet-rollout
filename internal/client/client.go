@@ -22,6 +22,10 @@ import (
 const (
 	defaultTimeout   = 60 * time.Second
 	maxErrorBodySize = 1 << 20
+	// maxResponseBytes bounds any response, and is far more than a page of results.
+	maxResponseBytes = 32 << 20
+	// maxDeviceResponseBytes bounds a poll or report response, which is small.
+	maxDeviceResponseBytes = 1 << 20
 )
 
 // APIError is an error response from the server, as opposed to a transport
@@ -102,13 +106,32 @@ func New(baseURL, token string, httpClient *http.Client) *Client {
 
 // do sends a request and decodes a successful response into out, if out is set.
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, body, out any) error {
+	return c.doLimited(ctx, method, path, query, body, out, maxResponseBytes)
+}
+
+// doLimited is do, reading at most limit bytes of a successful response. A device trusts
+// nothing from the server, including how much it sends.
+func (c *Client) doLimited(ctx context.Context, method, path string, query url.Values, body, out any, limit int64) error {
+	raw, err := c.send(ctx, method, path, query, body, out != nil, limit)
+	if err != nil || out == nil {
+		return err
+	}
+	if err := json.Unmarshal(raw, out); err != nil {
+		return fmt.Errorf("decode response from %s %s: %w", method, path, err)
+	}
+	return nil
+}
+
+// send makes a request and returns up to limit bytes of a successful response's body, if
+// read is set.
+func (c *Client) send(ctx context.Context, method, path string, query url.Values, body any, read bool, limit int64) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
 	defer cancel()
 	var reader io.Reader = http.NoBody
 	if body != nil {
 		encoded, err := json.Marshal(body)
 		if err != nil {
-			return fmt.Errorf("encode request: %w", err)
+			return nil, fmt.Errorf("encode request: %w", err)
 		}
 		reader = bytes.NewReader(encoded)
 	}
@@ -118,7 +141,7 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	}
 	req, err := http.NewRequestWithContext(ctx, method, target, reader)
 	if err != nil {
-		return fmt.Errorf("build request: %w", err)
+		return nil, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	if body != nil {
@@ -127,20 +150,24 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("%s %s: %w", method, path, err)
+		return nil, fmt.Errorf("%s %s: %w", method, path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= http.StatusBadRequest {
-		return decodeError(resp)
+		return nil, decodeError(resp)
 	}
-	if out == nil {
-		return nil
+	if !read {
+		return nil, nil
 	}
-	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-		return fmt.Errorf("decode response from %s %s: %w", method, path, err)
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("read response from %s %s: %w", method, path, err)
 	}
-	return nil
+	if int64(len(raw)) > limit {
+		return nil, fmt.Errorf("response from %s %s is larger than %d bytes", method, path, limit)
+	}
+	return raw, nil
 }
 
 func decodeError(resp *http.Response) error {
@@ -310,22 +337,29 @@ func NewDevice(baseURL, token string, httpClient *http.Client) *DeviceClient {
 // Poll asks for the device's current assignment, and records that it was heard from.
 func (c *DeviceClient) Poll(ctx context.Context) (apiv1.PollResponse, error) {
 	var out apiv1.PollResponse
-	err := c.client.do(ctx, http.MethodPost, "/v1/device/poll", nil, nil, &out)
+	err := c.client.doLimited(ctx, http.MethodPost, "/v1/device/poll", nil, nil, &out, maxDeviceResponseBytes)
 	return out, err
 }
 
 // Report sends a status update. A retry must repeat the same request exactly.
 func (c *DeviceClient) Report(ctx context.Context, req apiv1.ReportRequest) (apiv1.ReportResponse, error) {
 	var out apiv1.ReportResponse
-	err := c.client.do(ctx, http.MethodPost, "/v1/device/reports", nil, req, &out)
+	err := c.client.doLimited(ctx, http.MethodPost, "/v1/device/reports", nil, req, &out, maxDeviceResponseBytes)
 	return out, err
 }
 
 // Manifest fetches the signed manifest for an artifact the device is assigned.
 func (c *DeviceClient) Manifest(ctx context.Context, artifactID string) (signing.Envelope, error) {
-	var out signing.Envelope
-	err := c.client.do(ctx, http.MethodGet, "/v1/device/artifacts/"+segment(artifactID)+"/manifest", nil, nil, &out)
-	return out, err
+	path := "/v1/device/artifacts/" + segment(artifactID) + "/manifest"
+	raw, err := c.client.send(ctx, http.MethodGet, path, nil, nil, true, signing.MaxEnvelopeBytes)
+	if err != nil {
+		return signing.Envelope{}, err
+	}
+	envelope, err := signing.ParseEnvelope(raw)
+	if err != nil {
+		return signing.Envelope{}, fmt.Errorf("decode response from GET %s: %w", path, err)
+	}
+	return envelope, nil
 }
 
 // RangeResponse is what came back for a Range request, unchecked. The body is the caller's
