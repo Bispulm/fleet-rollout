@@ -28,6 +28,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Bispulm/fleet-rollout/internal/db"
+	"github.com/Bispulm/fleet-rollout/internal/rollout"
 	"github.com/Bispulm/fleet-rollout/internal/signing"
 	"github.com/Bispulm/fleet-rollout/internal/sim"
 )
@@ -91,6 +92,7 @@ type common struct {
 	// Rates below zero leave the preset's own.
 	dropRate       *float64
 	badReleaseRate *float64
+	onBreach       *string
 }
 
 func commonFlags(flags *flag.FlagSet, soak, maxTime time.Duration) common {
@@ -106,6 +108,7 @@ func commonFlags(flags *flag.FlagSet, soak, maxTime time.Duration) common {
 			"share of device requests that fail before reaching the server (default: the preset's)"),
 		badReleaseRate: flags.Float64("bad-release-rate", -1,
 			"share of devices on which the release fails its health check (default: the preset's)"),
+		onBreach: flags.String("on-breach", "halt", "what a breach does: halt, or rollback to restore what devices ran before"),
 	}
 }
 
@@ -136,6 +139,12 @@ func (c common) scenario(defaultFleet string) (sim.Scenario, error) {
 	sc.Fleet = *c.fleet
 	if sc.Fleet == "" {
 		sc.Fleet = defaultFleet
+	}
+	switch onBreach := rollout.OnBreach(*c.onBreach); onBreach {
+	case rollout.OnBreachHalt, rollout.OnBreachRollback:
+		sc.Policy.Safety.OnBreach = onBreach
+	default:
+		return sim.Scenario{}, fmt.Errorf("--on-breach must be halt or rollback, got %q", *c.onBreach)
 	}
 	sc.MaxDuration = *c.maxTime
 	return sc, nil
@@ -409,6 +418,9 @@ func printReport(w io.Writer, r sim.Report, asJSON bool) error {
 	for _, s := range r.Stages {
 		fmt.Fprintf(&b, "  stage %d  %-8s %4d devices: %d succeeded, %d failed, %d superseded, %d never assigned\n",
 			s.Ordinal, s.State, s.Cohort, s.Succeeded, s.Failed, s.Superseded, s.Pending)
+	}
+	if rb := r.Rollback; rb != nil {
+		fmt.Fprintf(&b, "rolled back: %d of %d updated devices restored, %d unresolved\n", rb.Restored, rb.Needed, rb.Unresolved)
 	}
 	fmt.Fprintf(&b, "updated %d of %d devices; failures %s; bad installs %d\n",
 		r.Updated, r.Scenario.Devices, counts(r.Failures), r.BadInstalls)

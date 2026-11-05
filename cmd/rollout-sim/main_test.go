@@ -23,6 +23,7 @@ func TestArgumentsAreChecked(t *testing.T) {
 		"too many devices": {"run", "--devices", "100001", "--database-url", "postgres://x"},
 		"drop rate over 1": {"run", "--drop-rate", "1.5", "--database-url", "postgres://x"},
 		"bad rate over 1":  {"run", "--bad-release-rate", "2", "--database-url", "postgres://x"},
+		"bad breach":       {"run", "--on-breach", "panic", "--database-url", "postgres://x"},
 		"no admin token":   {"live", "--key", "release.key"},
 		"fleet, no tokens": {"fleet", "--trust-keys", "release.pub"},
 		"fleet, no trust":  {"fleet", "--tokens-file", "tokens.txt"},

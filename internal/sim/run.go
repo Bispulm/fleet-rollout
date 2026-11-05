@@ -120,7 +120,9 @@ type Report struct {
 	State      rollout.State `json:"state"`
 	HaltReason string        `json:"halt_reason,omitempty"`
 	HaltDetail string        `json:"halt_detail,omitempty"`
-	Stages     []StageResult `json:"stages"`
+	// Rollback is how the rollback went, if there was one.
+	Rollback *apiv1.RollbackProgress `json:"rollback,omitempty"`
+	Stages   []StageResult           `json:"stages"`
 	// Updated is how many devices end up running the new release.
 	Updated int `json:"updated"`
 	// BadInstalls counts devices running content that isn't the signed artifact. It must
@@ -228,14 +230,22 @@ func setUp(ctx context.Context, admin *client.Client, sc Scenario, signer ed2551
 	return fleetSetup{rolloutID: id, content: content, tokens: tokens}, nil
 }
 
+// finished reports whether a rollout has stopped changing on its own. A rollout that's rolling
+// back hasn't.
 func finished(state rollout.State) bool {
-	return state == rollout.StateCompleted || state == rollout.StateHalted
+	switch state {
+	case rollout.StateCompleted, rollout.StateHalted, rollout.StateRolledBack, rollout.StateRollbackIncomplete,
+		rollout.StateAborted:
+		return true
+	}
+	return false
 }
 
 // summarize turns the final state into a report.
 func summarize(report *Report, status apiv1.Rollout, devices []*device, content []byte) {
 	report.State = status.State
 	report.HaltReason, report.HaltDetail = status.HaltReason, status.HaltDetail
+	report.Rollback = status.Rollback
 	for _, stage := range status.Stages {
 		cohort := 0
 		if stage.CohortSize != nil {
