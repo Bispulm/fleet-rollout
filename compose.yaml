@@ -20,5 +20,71 @@ services:
       timeout: 3s
       retries: 30
 
+  # The rest is the observability profile: rolloutd itself, with Prometheus, Grafana, and Jaeger
+  # watching it. Start it with `make obs-up`. Everything binds to loopback.
+  migrate:
+    profiles: [observability]
+    image: fleet-rollout:dev
+    command: ["rolloutd", "migrate"]
+    environment: &rolloutd-env
+      ROLLOUTD_DATABASE_URL: postgres://rollout:rollout_dev@postgres:5432/rollout?sslmode=disable
+      # Empty by default, so that running just Postgres doesn't need it. rolloutd refuses to
+      # start without one, and make obs-up checks first.
+      ROLLOUTD_ADMIN_TOKEN: ${ROLLOUT_ADMIN_TOKEN:-}
+      ROLLOUTD_TRUST_KEYS_FILE: /etc/fleet-rollout/trust.pem
+      ROLLOUTD_ARTIFACT_DIR: /var/lib/fleet-rollout/artifacts
+      ROLLOUTD_LISTEN_ADDR: 0.0.0.0:18100
+      ROLLOUTD_METRICS_ADDR: 0.0.0.0:18102
+      ROLLOUTD_ALLOW_NON_LOOPBACK: "true"
+      ROLLOUTD_POLL_INTERVAL: 2s
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+    volumes: &rolloutd-volumes
+      - ${ROLLOUT_TRUST_KEYS:-./release.pub}:/etc/fleet-rollout/trust.pem:ro
+      - artifacts:/var/lib/fleet-rollout/artifacts
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  rolloutd:
+    profiles: [observability]
+    image: fleet-rollout:dev
+    command: ["rolloutd", "serve"]
+    environment: *rolloutd-env
+    volumes: *rolloutd-volumes
+    ports:
+      - "127.0.0.1:18100:18100"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  prometheus:
+    profiles: [observability]
+    image: prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06
+    volumes:
+      - ./deploy/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "127.0.0.1:18104:9090"
+
+  grafana:
+    profiles: [observability]
+    image: grafana/grafana:13.3.0@sha256:488984b716c0862639f91a698adbe2862677a5a07bad42da5f03f3030883b205
+    environment:
+      # Local only: anyone who can reach the loopback port may look, and nobody may change anything.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/fleet-rollout.json
+    volumes:
+      - ./deploy/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "127.0.0.1:18103:3000"
+
+  jaeger:
+    profiles: [observability]
+    image: jaegertracing/jaeger:2.23.0@sha256:3823829974ccfc2485d2e48b165579091f32295022ae80ca49704e2f4834116e
+    ports:
+      - "127.0.0.1:18105:16686"
+
 volumes:
   postgres-data:
+  artifacts:
