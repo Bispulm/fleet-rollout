@@ -39,7 +39,8 @@ wherever possible:
 | Policy and identity never change | `BEFORE UPDATE` trigger |
 | Every update advances the revision by one | `BEFORE UPDATE` trigger |
 | Finished rollouts never change | `BEFORE UPDATE` trigger |
-| Membership frozen after start | Triggers on insert, update, and delete |
+| Starting is one-way, and its member count and time are fixed | `BEFORE UPDATE` trigger |
+| Membership and stage sizes frozen after start | Triggers on insert, update, and delete |
 | Audit log and device events are append only | `BEFORE UPDATE OR DELETE` triggers |
 | One open assignment per device | Partial unique index |
 | A report sequence is used once per device | Unique constraint |

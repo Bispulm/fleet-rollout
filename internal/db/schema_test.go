@@ -70,7 +70,7 @@ func (f fixture) addMember(ctx context.Context, rolloutID, deviceID string) erro
 
 // start moves a rollout out of draft the way the store does: one revision bump.
 func (f fixture) start(ctx context.Context, rolloutID string) error {
-	_, err := f.pool.Exec(ctx, `UPDATE rollouts SET state = 'running', revision = revision + 1, started_at = now()
+	_, err := f.pool.Exec(ctx, `UPDATE rollouts SET state = 'running', revision = revision + 1, started_at = now(), member_count = 1
 		WHERE id = $1`, rolloutID)
 	return err
 }
@@ -335,5 +335,63 @@ func TestDeviceEventsAreAppendOnlyAndSequenced(t *testing.T) {
 	_, err = f.pool.Exec(ctx, `UPDATE device_events SET type = 'changed' WHERE device_id = $1`, f.deviceID)
 	requireSQLState(t, err, sqlRestrictViolation)
 	_, err = f.pool.Exec(ctx, `DELETE FROM device_events WHERE device_id = $1`, f.deviceID)
+	requireSQLState(t, err, sqlRestrictViolation)
+}
+
+func TestStartedRolloutCannotReturnToDraft(t *testing.T) {
+	ctx := testContext(t)
+	f := exposedFixture(t, ctx)
+	_, err := f.pool.Exec(ctx, `UPDATE rollouts SET state = 'draft', started_at = NULL, revision = revision + 1 WHERE id = $1`, f.rolloutID)
+	requireSQLState(t, err, sqlRestrictViolation)
+}
+
+func TestFrozenRolloutFactsCannotBeRewritten(t *testing.T) {
+	ctx := testContext(t)
+	f := exposedFixture(t, ctx)
+	for name, sql := range map[string]string{
+		"member count": `UPDATE rollouts SET member_count = 99, revision = revision + 1 WHERE id = $1`,
+		"clear count":  `UPDATE rollouts SET member_count = NULL, revision = revision + 1 WHERE id = $1`,
+		"start time":   `UPDATE rollouts SET started_at = now() - interval '1 day', revision = revision + 1 WHERE id = $1`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := f.pool.Exec(ctx, sql, f.rolloutID)
+			requireSQLState(t, err, sqlRestrictViolation)
+		})
+	}
+}
+
+func TestStagePlanFreezesWhenRolloutLeavesDraft(t *testing.T) {
+	ctx := testContext(t)
+	f := newFixture(t, ctx)
+
+	// Sizing a stage is how the start transaction works, while still a draft.
+	mustExec(t, ctx, f.pool, `UPDATE rollout_stages SET target_count = 1, cohort_size = 1 WHERE rollout_id = $1 AND ordinal = 1`, f.rolloutID)
+	if err := f.start(ctx, f.rolloutID); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	for name, sql := range map[string]string{
+		"target":  `UPDATE rollout_stages SET target_count = 50 WHERE rollout_id = $1 AND ordinal = 1`,
+		"cohort":  `UPDATE rollout_stages SET cohort_size = 50 WHERE rollout_id = $1 AND ordinal = 1`,
+		"percent": `UPDATE rollout_stages SET percent = 99 WHERE rollout_id = $1 AND ordinal = 1`,
+		"ordinal": `UPDATE rollout_stages SET ordinal = 7 WHERE rollout_id = $1 AND ordinal = 1`,
+		"insert":  `INSERT INTO rollout_stages (rollout_id, ordinal, percent) VALUES ($1, 3, 100)`,
+		"delete":  `DELETE FROM rollout_stages WHERE rollout_id = $1 AND ordinal = 2`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := f.pool.Exec(ctx, sql, f.rolloutID)
+			requireSQLState(t, err, sqlRestrictViolation)
+		})
+	}
+
+	// Progress through a stage is what the engine updates while a rollout runs.
+	mustExec(t, ctx, f.pool, `UPDATE rollout_stages SET state = 'soaking', soak_started_at = now() WHERE rollout_id = $1 AND ordinal = 1`, f.rolloutID)
+}
+
+func TestStagePercentCannotChangeEvenInDraft(t *testing.T) {
+	ctx := testContext(t)
+	f := newFixture(t, ctx)
+	// The policy is immutable from creation, and percent is part of it.
+	_, err := f.pool.Exec(ctx, `UPDATE rollout_stages SET percent = 99 WHERE rollout_id = $1 AND ordinal = 1`, f.rolloutID)
 	requireSQLState(t, err, sqlRestrictViolation)
 }
