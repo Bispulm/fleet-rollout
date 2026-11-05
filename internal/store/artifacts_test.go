@@ -121,3 +121,25 @@ func TestGetArtifactReportsNotFound(t *testing.T) {
 		}
 	}
 }
+
+func TestFindArtifactByNamePlatformAndVersion(t *testing.T) {
+	s, ctx := newStore(t)
+	arm := mustRegisterArtifact(t, ctx, s, newArtifact("1.4.0", 14))
+	other := newArtifact("1.4.0", 14)
+	other.Platform = "linux/amd64"
+	amd := mustRegisterArtifact(t, ctx, s, other)
+
+	got, err := s.FindArtifact(ctx, arm.Name, "linux/amd64", "1.4.0")
+	if err != nil || got.ID != amd.ID {
+		t.Fatalf("FindArtifact = %+v, %v, want %s", got, err, amd.ID)
+	}
+	for _, missing := range [][3]string{
+		{arm.Name, arm.Platform, "9.9.9"},
+		{arm.Name, "linux/riscv64", "1.4.0"},
+		{"other-app", arm.Platform, "1.4.0"},
+	} {
+		if _, err := s.FindArtifact(ctx, missing[0], missing[1], missing[2]); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("FindArtifact(%v) error = %v, want ErrNotFound", missing, err)
+		}
+	}
+}

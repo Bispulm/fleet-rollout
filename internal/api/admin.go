@@ -57,6 +57,7 @@ func (s *Server) registerAdminRoutes() {
 	s.mux.Handle("GET /v1/fleets/{fleet}/devices", s.admin(s.handleListDevices))
 	s.mux.Handle("PATCH /v1/devices/{id}", s.admin(s.handleUpdateDevice))
 	s.mux.Handle("POST /v1/artifacts", s.admin(s.handleCreateArtifact))
+	s.mux.Handle("GET /v1/artifacts", s.admin(s.handleFindArtifacts))
 	s.mux.Handle("GET /v1/artifacts/{id}", s.admin(s.handleGetArtifact))
 	s.mux.Handle("PUT /v1/artifacts/{id}/content", s.adminWithTimeout(uploadTimeout, s.handleUploadContent))
 	s.mux.Handle("POST /v1/fleets/{fleet}/rollouts", s.admin(s.handleCreateRollout))
