@@ -130,7 +130,7 @@ rollout, so it's safe to retry.`,
 	flags.StringVar(&f.coverage, "required-coverage", "", "share of a cohort that must report an outcome (default 90%)")
 	flags.StringVar(&f.maxUnknown, "max-unknown", "", "largest share of a cohort allowed to be unknown at promotion (default 5%)")
 	flags.DurationVar(&f.staleAfter, "stale-after", 0, "silence after which a device counts as unknown (default 15m)")
-	flags.StringVar(&f.onBreach, "on-breach", "", "action when a threshold is crossed: halt or rollback (default halt)")
+	flags.StringVar(&f.onBreach, "on-breach", "", "action when a threshold is crossed; only halt is available so far (default halt)")
 	flags.StringArrayVar(&f.selector, "selector", nil, "only include devices with this label, as key=value; repeatable")
 	flags.StringArrayVar(&f.exclude, "exclude-device", nil, "leave this device out; repeatable")
 	mustMarkRequired(cmd, "fleet", "name", "artifact", "stages", "max-failure-rate")

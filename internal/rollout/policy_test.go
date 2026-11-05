@@ -118,6 +118,7 @@ func TestNormalizeRejectsInvalidPolicies(t *testing.T) {
 		{"unknown limit above 100%", "safety.max_unknown_bps", func(s *PolicySpec) { s.Safety.MaxUnknownBPS = ptr(10001) }},
 		{"stale window too short", "safety.stale_after", func(s *PolicySpec) { s.Safety.StaleAfter = ptr(Duration(time.Millisecond)) }},
 		{"unknown breach action", "safety.on_breach", func(s *PolicySpec) { s.Safety.OnBreach = "panic" }},
+		{"rollback on breach, which doesn't exist yet", "safety.on_breach", func(s *PolicySpec) { s.Safety.OnBreach = OnBreachRollback }},
 		{"malformed selector key", "selector", func(s *PolicySpec) { s.Selector = map[string]string{"bad key": "x"} }},
 		{"empty selector value", "selector", func(s *PolicySpec) { s.Selector = map[string]string{"site": ""} }},
 		{"malformed excluded device", "exclude_devices", func(s *PolicySpec) { s.ExcludeDevices = []string{"bad id"} }},

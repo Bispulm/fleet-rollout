@@ -206,12 +206,12 @@ func TestCreatePassesEveryPolicyFlag(t *testing.T) {
 	r := e.createRollout(artifact,
 		"--deadline", "2h", "--min-observations", "1,2,3,4",
 		"--rollout-max-failure-rate", "1.5%", "--required-coverage", "95%", "--max-unknown", "0.25%",
-		"--stale-after", "20m", "--on-breach", "rollback", "--selector", "site=lab",
+		"--stale-after", "20m", "--on-breach", "halt", "--selector", "site=lab",
 		"--exclude-device", "sim-00003", "--id", "11111111-1111-4111-8111-111111111111")
 
 	s := r.Policy.Safety
 	if s.RolloutMaxFailureBPS != 150 || s.RequiredCoverageBPS != 9500 || s.MaxUnknownBPS != 25 ||
-		s.StaleAfter.Std() != 20*time.Minute || s.OnBreach != rollout.OnBreachRollback {
+		s.StaleAfter.Std() != 20*time.Minute || s.OnBreach != rollout.OnBreachHalt {
 		t.Fatalf("safety = %+v", s)
 	}
 	if r.ID != "11111111-1111-4111-8111-111111111111" {
