@@ -356,6 +356,12 @@ func (a *app) printRollout(r apiv1.Rollout) error {
 	row("Fleet", r.Fleet)
 	row("Artifact", r.ArtifactID)
 	row("State", string(r.State))
+	if r.Waiting != "" {
+		row("Waiting", r.Waiting)
+	}
+	if r.HaltReason != "" {
+		row("Halted", r.HaltReason+": "+r.HaltDetail)
+	}
 	row("Revision", strconv.FormatInt(r.Revision, 10))
 	if r.MemberCount != nil {
 		row("Members", strconv.Itoa(*r.MemberCount))
@@ -377,15 +383,16 @@ func (a *app) printRollout(r apiv1.Rollout) error {
 		return err
 	}
 	stages := a.table()
-	_, _ = fmt.Fprintln(stages, "STAGE\tPERCENT\tTARGET\tNEW\tMIN OBS\tSOAK\tSTATE\tDEADLINE")
+	_, _ = fmt.Fprintln(stages, "STAGE\tPERCENT\tTARGET\tNEW\tMIN OBS\tSOAK\tSTATE\tOK\tFAILED\tIN FLIGHT\tPENDING\tUNKNOWN\tDEADLINE")
 	for i, st := range r.Stages {
 		spec := r.Policy.Stages[i]
 		deadline := "-"
 		if st.DeadlineAt != nil {
 			deadline = st.DeadlineAt.Format(timeLayout)
 		}
-		_, _ = fmt.Fprintf(stages, "%d\t%d%%\t%s\t%s\t%d\t%s\t%s\t%s\n", st.Ordinal, st.Percent,
-			optionalInt(st.TargetCount), optionalInt(st.CohortSize), spec.MinObservations, spec.Soak.Std(), st.State, deadline)
+		_, _ = fmt.Fprintf(stages, "%d\t%d%%\t%s\t%s\t%d\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%s\n", st.Ordinal, st.Percent,
+			optionalInt(st.TargetCount), optionalInt(st.CohortSize), spec.MinObservations, spec.Soak.Std(), st.State,
+			st.Succeeded, st.Failed, st.InFlight, st.Pending, st.Unknown, deadline)
 	}
 	return stages.Flush()
 }

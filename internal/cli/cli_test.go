@@ -17,6 +17,7 @@ import (
 	"github.com/Bispulm/fleet-rollout/internal/api"
 	"github.com/Bispulm/fleet-rollout/internal/apiv1"
 	"github.com/Bispulm/fleet-rollout/internal/cli"
+	"github.com/Bispulm/fleet-rollout/internal/client"
 	"github.com/Bispulm/fleet-rollout/internal/rollout"
 	"github.com/Bispulm/fleet-rollout/internal/store"
 	"github.com/Bispulm/fleet-rollout/internal/testdb"
@@ -28,21 +29,24 @@ const adminToken = "cli-test-credential-value"
 type env struct {
 	t      *testing.T
 	getenv func(string) string
+	base   string
+	store  *store.Store
 }
 
 func newEnv(t *testing.T) env {
 	t.Helper()
 	t.Parallel()
+	st := store.New(testdb.New(t))
 	srv := api.New(api.Options{
 		Logger:     slog.New(slog.DiscardHandler),
 		Ready:      func(context.Context) error { return nil },
-		Store:      store.New(testdb.New(t)),
+		Store:      st,
 		AdminToken: adminToken,
 	})
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 	vars := map[string]string{"ROLLOUT_API_URL": ts.URL, "ROLLOUT_ADMIN_TOKEN": adminToken}
-	return env{t: t, getenv: func(k string) string { return vars[k] }}
+	return env{t: t, getenv: func(k string) string { return vars[k] }, base: ts.URL, store: st}
 }
 
 func (e env) run(args ...string) (string, error) {
@@ -419,5 +423,63 @@ func TestParsersAtTheirBoundaries(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("ParseRate(%q) = %d, want %d", input, got, tc.want)
 		}
+	}
+}
+
+func TestStatusExplainsProgressAndHalts(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun("fleet", "create", "lab-a")
+	file := filepath.Join(t.TempDir(), "a.bin")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	artifact := mustJSON[apiv1.Artifact](e, "artifact", "register", "--name", "demo", "--version", "1.0.0",
+		"--platform", "linux/arm64", "--release", "1", "--file", file)
+	var tokens []string
+	for _, id := range []string{"bench-1", "bench-2"} {
+		registered := mustJSON[apiv1.DeviceList](e, "device", "register", "--fleet", "lab-a", "--id", id, "--platform", "linux/arm64")
+		tokens = append(tokens, registered.Devices[0].Token)
+	}
+	r := mustJSON[apiv1.Rollout](e, "rollout", "create", "--fleet", "lab-a", "--name", "demo", "--artifact", artifact.ID,
+		"--stages", "100", "--max-failure-rate", "2%")
+	e.mustRun("rollout", "start", r.ID)
+
+	if status := e.mustRun("rollout", "status", r.ID); !strings.Contains(status, "Waiting:") || !strings.Contains(status, "coverage") {
+		t.Fatalf("a running rollout should say what it's waiting for:\n%s", status)
+	}
+
+	// One device reports a failure, and the engine evaluates the rollout.
+	device := client.NewDevice(e.base, tokens[0], nil)
+	polled, err := device.Poll(t.Context())
+	if err != nil || polled.Assignment == nil {
+		t.Fatalf("Poll = %+v, err = %v", polled, err)
+	}
+	a := polled.Assignment
+	if _, err := device.Report(t.Context(), apiv1.ReportRequest{
+		Sequence: 1, RolloutID: a.RolloutID, AssignmentID: a.ID, Generation: a.Generation,
+		State: rollout.AssignmentFailed, Reason: "health check failed",
+	}); err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	fence, ok, err := e.store.AcquireLease(t.Context(), "test", time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("AcquireLease: ok = %v, err = %v", ok, err)
+	}
+	if _, err := e.store.AdvanceRollout(t.Context(), r.ID, fence); err != nil {
+		t.Fatalf("AdvanceRollout: %v", err)
+	}
+
+	status := e.mustRun("rollout", "status", r.ID)
+	for _, want := range []string{"halted", "Halted:", "stage_breach", "FAILED", "failed"} {
+		if !strings.Contains(status, want) {
+			t.Errorf("status is missing %q:\n%s", want, status)
+		}
+	}
+	if strings.Contains(status, "Waiting:") {
+		t.Errorf("a halted rollout isn't waiting for anything:\n%s", status)
+	}
+	history := e.mustRun("rollout", "history", r.ID)
+	if !strings.Contains(history, "breach") || !strings.Contains(history, "engine") {
+		t.Errorf("history doesn't show the engine's decision:\n%s", history)
 	}
 }

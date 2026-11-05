@@ -256,7 +256,7 @@ func TestBreachHaltsAndBoundsFurtherExposure(t *testing.T) {
 	if after.HaltReason == nil || *after.HaltReason != string(rollout.HaltStageBreach) {
 		t.Fatalf("halt reason = %v", after.HaltReason)
 	}
-	if after.HaltDetail == nil || !strings.Contains(*after.HaltDetail, "2 failures") {
+	if after.HaltDetail == nil || !strings.Contains(*after.HaltDetail, "2 failed") {
 		t.Fatalf("halt detail = %v", after.HaltDetail)
 	}
 	stage := after.Stages[0]

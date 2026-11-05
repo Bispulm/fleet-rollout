@@ -142,7 +142,7 @@ func (p Policy) checkBreaches(e Evaluation) (Verdict, bool) {
 		if !observed && !certain {
 			continue
 		}
-		detail := fmt.Sprintf("stage %d has %d failures in %d outcomes from a cohort of %d, above the %s limit",
+		detail := fmt.Sprintf("stage %d: %d failed of %d outcomes, in a cohort of %d, above the %s limit",
 			stage.Ordinal, o.Failed, o.Observed(), o.Cohort, formatBPS(p.Safety.MaxFailureBPS))
 		switch {
 		case stage.Ordinal != e.CurrentStage:
@@ -159,7 +159,7 @@ func (p Policy) checkBreaches(e Evaluation) (Verdict, bool) {
 		return Verdict{
 			Action: ActionHalt,
 			Reason: HaltRolloutBreach,
-			Detail: fmt.Sprintf("%d failures in %d outcomes across the rollout, above the %s limit",
+			Detail: fmt.Sprintf("%d failed of %d outcomes across the rollout, above the %s limit",
 				everyone.Failed, everyone.Observed(), formatBPS(p.Safety.RolloutMaxFailureBPS)),
 		}, true
 	}
