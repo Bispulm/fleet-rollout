@@ -4,10 +4,10 @@ A control plane for staging software updates across a fleet of unreliable device
 It exposes each update to a growing share of the fleet, watches what happens, and stops before a
 bad release reaches everyone.
 
-**Status: early development.** Devices can't receive updates yet. Today you can register a fleet
-and its devices, record artifact metadata, create a rollout with a validated safety policy, start
-it, and inspect its frozen, deterministic cohort. See [what works](#what-works-today) and the
-[roadmap](#roadmap).
+**Status: early development.** The control plane works: it issues assignments to devices that poll,
+takes their reports, advances stages, and halts a rollout that crosses a safety threshold. There's no
+real device agent yet, and artifacts are metadata only, so nothing is downloaded or installed. See
+[what works](#what-works-today) and the [roadmap](#roadmap).
 
 All devices are simulated. This isn't meant to run on real hardware.
 
@@ -27,7 +27,8 @@ export ROLLOUT_ADMIN_TOKEN="$ROLLOUTD_ADMIN_TOKEN"
 sleep 1
 
 ./bin/rolloutctl fleet create lab-a
-./bin/rolloutctl device register-synthetic --fleet lab-a --count 100 --platform linux/arm64
+./bin/rolloutctl device register-synthetic --fleet lab-a --count 100 --platform linux/arm64 \
+  --tokens-file tokens.txt
 
 # Any file works as an artifact. Only its size and digest are recorded for now.
 head -c 4096 /dev/urandom > demo-app.bin
@@ -72,12 +73,44 @@ Then try the parts that refuse to do the wrong thing:
 ./bin/rolloutctl rollout history "$ROLLOUT_ID"
 ```
 
+Now send it a bad release. There's no agent yet, so this loop plays the part of the devices: each one
+polls, and any device given work reports a failed install. Only the first stage is exposed, so that's a
+single device out of 100.
+
+```bash
+API=http://127.0.0.1:18100
+while read -r id token; do
+  response="$(curl -fsS -X POST -H "Authorization: Bearer $token" "$API/v1/device/poll")"
+  assignment="$(printf '%s' "$response" | sed -n 's/.*"assignment":{"id":"\([^"]*\)".*/\1/p')"
+  [ -n "$assignment" ] || continue
+  echo "$id was assigned work and failed"
+  curl -fsS -o /dev/null -X POST -H "Authorization: Bearer $token" \
+    -d "{\"sequence\":1,\"rollout_id\":\"$ROLLOUT_ID\",\"assignment_id\":\"$assignment\",\"generation\":1,\"state\":\"failed\"}" \
+    "$API/v1/device/reports"
+done < tokens.txt
+
+sleep 6  # the engine evaluates every 5 seconds
+./bin/rolloutctl rollout status "$ROLLOUT_ID"
+```
+
+The rollout halts, and the other 99 devices are never offered the release:
+
+```text
+sim-00076 was assigned work and failed
+...
+State:          halted
+Halted:         stage_breach: stage 1: 1 failed of 1 outcomes, in a cohort of 1, above the 2.00% limit
+```
+
+A halted rollout can't be resumed. An operator aborts it, or will be able to roll it back once that
+exists, and a fresh rollout is the way forward.
+
 To clean up:
 
 ```bash
 kill %1                # stop rolloutd
 make dev-reset         # stop Postgres and delete this project's data
-rm -f artifact.json demo-app.bin rolloutd.log
+rm -f artifact.json demo-app.bin rolloutd.log tokens.txt
 ```
 
 ## What works today
@@ -89,6 +122,11 @@ rm -f artifact.json demo-app.bin rolloutd.log
 | Cohorts | Devices rank by a hash of the rollout ID and device ID, so stages are nested and reproducible. |
 | Frozen data | Membership and policy freeze at start. Database triggers enforce this, not just application code. |
 | Transitions | Start, pause, resume, and abort each run in one transaction with a row lock and an audit entry. Concurrent attempts have one winner. |
+| Assignments | Devices poll for work. A device only gets work once its stage is exposed, and a poll can't slip past a pause or halt that's committing. |
+| Reports | Bound to the authenticated device, rollout, generation, and sequence. Repeats change nothing, and delayed reports can't undo newer ones. |
+| Stage progression | Each stage is judged by its own cohort, with exact threshold arithmetic. Coverage, soak, and a separate limit on unknown devices all have to pass. Missing reports never count as success. |
+| Halting | Stops new exposure and cancels work that hasn't reached installation, in one transaction. The status shows why, and what's still in flight. |
+| Engine | Any number of instances can run. A fenced lease in Postgres means one decides at a time, and a stale leader can't commit anything. All state survives a restart. |
 | Operations | Health and readiness endpoints, drain on shutdown, structured logs, and separate admin and device credentials. The server binds to loopback unless told otherwise. |
 
 [docs/rollout-semantics.md](docs/rollout-semantics.md) is the behavior contract, including what is
@@ -99,13 +137,11 @@ together, and [docs/adr](docs/adr) records the decisions.
 
 None of this exists yet.
 
-- **Rollout core:** assignments, device polling, idempotent reports, and the engine that advances
-  stages under a fenced lease.
-- **Devices:** signed artifacts, a durable agent with resumable downloads and simulated A/B
-  installs, and a failure-injecting simulator that runs the real agent.
+- **Devices:** signed artifacts, a durable agent with resumable downloads and simulated A/B installs, and
+  a failure-injecting simulator that runs the real agent.
 - **Kubernetes:** custom resources, an operator, and a Helm chart.
-- **Safety and operations:** automatic halt, rollback, stale-device policy, metrics, traces, and
-  dashboards.
+- **Safety and operations:** rollback, metrics, traces, and dashboards, plus scale testing of the paths
+  built so far.
 - **Release:** published benchmarks and a full bad-release demo.
 
 Real hardware, vehicle protocols, multi-region control planes, a web UI, delta updates, and a full

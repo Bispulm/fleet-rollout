@@ -56,9 +56,13 @@ func (s *Store) GetArtifact(ctx context.Context, id string) (Artifact, error) {
 	if !rollout.ValidUUID(id) {
 		return Artifact{}, notFound("artifact", id)
 	}
+	return readArtifact(ctx, s.pool, id)
+}
+
+func readArtifact(ctx context.Context, q querier, id string) (Artifact, error) {
 	out := Artifact{ID: id}
 	var digest []byte
-	err := s.pool.QueryRow(ctx, `
+	err := q.QueryRow(ctx, `
 		SELECT name, version, platform, release_counter, size_bytes, sha256, created_at
 		FROM artifacts WHERE id = $1`, id).
 		Scan(&out.Name, &out.Version, &out.Platform, &out.ReleaseCounter, &out.SizeBytes, &digest, &out.CreatedAt)

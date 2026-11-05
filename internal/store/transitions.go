@@ -41,6 +41,9 @@ type Transition struct {
 	Actor      string
 	Reason     string
 	OccurredAt time.Time
+	// EngineGeneration is the leadership generation that made this decision. It's
+	// nil for an operator's action.
+	EngineGeneration *int64
 }
 
 // lockedRollout is a rollout row held under FOR UPDATE for one transaction.
@@ -67,17 +70,9 @@ func (s *Store) transition(
 		return Rollout{}, notFound("rollout", id)
 	}
 	err := s.inTx(ctx, func(tx pgx.Tx) error {
-		current := lockedRollout{id: id}
-		err := tx.QueryRow(ctx, `
-			SELECT fleet_id, artifact_id, state, revision, policy, paused_from, paused_at, current_stage
-			FROM rollouts WHERE id = $1 FOR UPDATE`, id).Scan(
-			&current.fleetID, &current.artifactID, &current.state, &current.revision, &current.policy,
-			&current.pausedFrom, &current.pausedAt, &current.currentStage)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return notFound("rollout", id)
-		}
+		current, err := lockRollout(ctx, tx, id)
 		if err != nil {
-			return fmt.Errorf("lock rollout: %w", err)
+			return err
 		}
 
 		if opts.ExpectedRevision != nil && *opts.ExpectedRevision != current.revision {
@@ -96,18 +91,67 @@ func (s *Store) transition(
 		if err := apply(tx, current, to, now); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO rollout_transitions (rollout_id, revision, from_state, to_state, event, actor, reason, occurred_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-			id, current.revision+1, current.state, to, event, opts.Actor, opts.Reason, now); err != nil {
-			return fmt.Errorf("record transition: %w", err)
-		}
-		return nil
+		return appendTransition(ctx, tx, transitionRecord{
+			rolloutID:  id,
+			revision:   current.revision + 1,
+			from:       current.state,
+			to:         to,
+			event:      event,
+			actor:      opts.Actor,
+			reason:     opts.Reason,
+			occurredAt: now,
+		})
 	})
 	if err != nil {
 		return Rollout{}, err
 	}
 	return s.GetRollout(ctx, id)
+}
+
+// lockRollout takes the rollout's row lock for a state change. FOR NO KEY UPDATE is the
+// right strength, since no key changes. It still blocks a poll's FOR SHARE, so nothing
+// can be issued mid-transition. Plain FOR UPDATE would also block the key-share lock a
+// report's foreign key check takes on this row, while that report holds an assignment a
+// halt needs to cancel, and the two would deadlock.
+func lockRollout(ctx context.Context, tx pgx.Tx, id string) (lockedRollout, error) {
+	current := lockedRollout{id: id}
+	err := tx.QueryRow(ctx, `
+		SELECT fleet_id, artifact_id, state, revision, policy, paused_from, paused_at, current_stage
+		FROM rollouts WHERE id = $1 FOR NO KEY UPDATE`, id).Scan(
+		&current.fleetID, &current.artifactID, &current.state, &current.revision, &current.policy,
+		&current.pausedFrom, &current.pausedAt, &current.currentStage)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return current, notFound("rollout", id)
+	}
+	if err != nil {
+		return current, fmt.Errorf("lock rollout: %w", err)
+	}
+	return current, nil
+}
+
+// transitionRecord is one row of the audit log.
+type transitionRecord struct {
+	rolloutID        string
+	revision         int64
+	from             rollout.State
+	to               rollout.State
+	event            rollout.Event
+	actor            string
+	reason           string
+	occurredAt       time.Time
+	engineGeneration *int64
+}
+
+func appendTransition(ctx context.Context, tx pgx.Tx, t transitionRecord) error {
+	_, err := tx.Exec(ctx, `
+		INSERT INTO rollout_transitions
+			(rollout_id, revision, from_state, to_state, event, actor, reason, occurred_at, engine_generation)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		t.rolloutID, t.revision, t.from, t.to, t.event, t.actor, t.reason, t.occurredAt, t.engineGeneration)
+	if err != nil {
+		return fmt.Errorf("record transition: %w", err)
+	}
+	return nil
 }
 
 // StartRollout freezes the rollout's membership and activates its first stage. If
@@ -266,10 +310,21 @@ func (s *Store) ResumeRollout(ctx context.Context, id string, opts TransitionOpt
 	})
 }
 
-// AbortRollout finishes a rollout without rolling it back. Devices keep whatever
-// they have installed, and the fleet is free for another rollout.
+// AbortRollout finishes a rollout without rolling it back. Assignments that haven't
+// reached installation are superseded. Devices keep whatever they have installed, and
+// the fleet is free for another rollout.
 func (s *Store) AbortRollout(ctx context.Context, id string, opts TransitionOptions) (Rollout, error) {
-	return s.transition(ctx, id, rollout.EventAbort, opts, func(tx pgx.Tx, _ lockedRollout, to rollout.State, now time.Time) error {
+	return s.transition(ctx, id, rollout.EventAbort, opts, func(tx pgx.Tx, current lockedRollout, to rollout.State, now time.Time) error {
+		if err := supersedeUnstarted(ctx, tx, id, now); err != nil {
+			return err
+		}
+		// A stage that already has a verdict keeps it, and a draft has no current stage.
+		if _, err := tx.Exec(ctx, `
+			UPDATE rollout_stages SET state = 'stopped', finished_at = $3
+			WHERE rollout_id = $1 AND ordinal = $2 AND state IN ('active', 'soaking')`,
+			id, current.currentStage, now); err != nil {
+			return fmt.Errorf("stop stage: %w", err)
+		}
 		_, err := tx.Exec(ctx, `
 			UPDATE rollouts SET state = $2, revision = revision + 1, paused_from = NULL, paused_at = NULL, finished_at = $3
 			WHERE id = $1`, id, to, now)
@@ -286,14 +341,14 @@ func (s *Store) ListTransitions(ctx context.Context, id string) ([]Transition, e
 		return nil, notFound("rollout", id)
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT revision, from_state, to_state, event, actor, reason, occurred_at
+		SELECT revision, from_state, to_state, event, actor, reason, occurred_at, engine_generation
 		FROM rollout_transitions WHERE rollout_id = $1 ORDER BY revision`, id)
 	if err != nil {
 		return nil, fmt.Errorf("query transitions: %w", err)
 	}
 	log, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (Transition, error) {
 		var t Transition
-		err := row.Scan(&t.Revision, &t.From, &t.To, &t.Event, &t.Actor, &t.Reason, &t.OccurredAt)
+		err := row.Scan(&t.Revision, &t.From, &t.To, &t.Event, &t.Actor, &t.Reason, &t.OccurredAt, &t.EngineGeneration)
 		return t, err
 	})
 	if err != nil {

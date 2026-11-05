@@ -100,6 +100,13 @@ func (h harness) expect(wantStatus int, method, path string, body, out any) {
 	}
 }
 
+func decode(t *testing.T, raw []byte, out any) {
+	t.Helper()
+	if err := json.Unmarshal(raw, out); err != nil {
+		t.Fatalf("decode %q: %v", raw, err)
+	}
+}
+
 func (h harness) problem(wantStatus int, method, path string, body any) apiv1.Problem {
 	h.t.Helper()
 	var p apiv1.Problem

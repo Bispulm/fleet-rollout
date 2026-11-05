@@ -2,6 +2,7 @@ package db_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"sync"
 	"testing"
@@ -112,13 +113,16 @@ func TestSchemaRejectsInvalidFleetAndDeviceRows(t *testing.T) {
 	if err := pool.QueryRow(ctx, `INSERT INTO fleets (name) VALUES ('lab-a') RETURNING id`).Scan(&fleetID); err != nil {
 		t.Fatalf("insert fleet: %v", err)
 	}
-	hash := make([]byte, 32)
+	hashOf := func(id string) []byte {
+		sum := sha256.Sum256([]byte(id))
+		return sum[:]
+	}
 	insertDevice := func(id, platform, status string, credential []byte) error {
 		_, err := pool.Exec(ctx, `INSERT INTO devices (id, fleet_id, platform, status, credential_hash)
 			VALUES ($1, $2, $3, $4, $5)`, id, fleetID, platform, status, credential)
 		return err
 	}
-	if err := insertDevice("sim-001", "linux/arm64", "active", hash); err != nil {
+	if err := insertDevice("sim-001", "linux/arm64", "active", hashOf("sim-001")); err != nil {
 		t.Fatalf("insert valid device: %v", err)
 	}
 
@@ -139,13 +143,13 @@ func TestSchemaRejectsInvalidFleetAndDeviceRows(t *testing.T) {
 			_, err := pool.Exec(ctx, `INSERT INTO fleets (name, labels) VALUES ('lab-b', '[]')`)
 			return err
 		}},
-		{"duplicate device id", "23505", func() error { return insertDevice("sim-001", "linux/arm64", "active", hash) }},
-		{"malformed device id", "23514", func() error { return insertDevice("bad id", "linux/arm64", "active", hash) }},
-		{"unknown device status", "23514", func() error { return insertDevice("sim-002", "linux/arm64", "gone", hash) }},
+		{"duplicate device id", "23505", func() error { return insertDevice("sim-001", "linux/arm64", "active", hashOf("sim-001")) }},
+		{"malformed device id", "23514", func() error { return insertDevice("bad id", "linux/arm64", "active", hashOf("bad id")) }},
+		{"unknown device status", "23514", func() error { return insertDevice("sim-002", "linux/arm64", "gone", hashOf("sim-002")) }},
 		{"short credential hash", "23514", func() error { return insertDevice("sim-003", "linux/arm64", "active", make([]byte, 8)) }},
 		{"unknown fleet", "23503", func() error {
 			_, err := pool.Exec(ctx, `INSERT INTO devices (id, fleet_id, platform, credential_hash)
-				VALUES ('sim-004', gen_random_uuid(), 'linux/arm64', $1)`, hash)
+				VALUES ('sim-004', gen_random_uuid(), 'linux/arm64', $1)`, hashOf("sim-004"))
 			return err
 		}},
 	}

@@ -12,3 +12,9 @@ coverage.*
 .env
 .env.*
 !.env.example
+
+# Files the README's quick start creates. tokens.txt holds device credentials.
+/tokens.txt
+/artifact.json
+/demo-app.bin
+/rolloutd.log

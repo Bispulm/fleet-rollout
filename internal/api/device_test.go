@@ -1,0 +1,279 @@
+package api_test
+
+import (
+	"net/http"
+	"strings"
+	"testing"
+
+	"github.com/Bispulm/fleet-rollout/internal/apiv1"
+	"github.com/Bispulm/fleet-rollout/internal/rollout"
+)
+
+// deviceFixture is a running rollout, with the tokens of the devices in its first stage.
+type deviceFixture struct {
+	harness
+	rollout apiv1.Rollout
+	first   string // Token of the device at position 1.
+	second  string // Token of the device at position 2.
+	later   string // Token of a device in a later stage.
+}
+
+func newDeviceFixture(t *testing.T) deviceFixture {
+	t.Helper()
+	h := newHarness(t)
+	h.createFleet("lab-a")
+	devices := h.registerDevices("lab-a", 20)
+	tokens := make(map[string]string, len(devices))
+	for _, d := range devices {
+		tokens[d.ID] = d.Token
+	}
+	var r apiv1.Rollout
+	h.expect(http.StatusCreated, http.MethodPost, "/v1/fleets/lab-a/rollouts", rolloutRequest(h.createArtifact().ID), &r)
+	h.expect(http.StatusOK, http.MethodPost, "/v1/rollouts/"+r.ID+"/start", nil, &r)
+
+	var page apiv1.CohortPage
+	h.expect(http.StatusOK, http.MethodGet, "/v1/rollouts/"+r.ID+"/cohort", nil, &page)
+	return deviceFixture{
+		harness: h,
+		rollout: r,
+		first:   tokens[page.Entries[0].DeviceID],
+		second:  tokens[page.Entries[1].DeviceID],
+		later:   tokens[page.Entries[5].DeviceID],
+	}
+}
+
+// on returns a fixture that reports failures to t, for use in subtests.
+func (f deviceFixture) on(t *testing.T) deviceFixture {
+	t.Helper()
+	f.harness = f.harness.on(t)
+	return f
+}
+
+func (f deviceFixture) poll(token string) apiv1.PollResponse {
+	f.t.Helper()
+	status, raw := f.doWithAuth("Bearer "+token, http.MethodPost, "/v1/device/poll", nil)
+	if status != http.StatusOK {
+		f.t.Fatalf("poll: status = %d, body: %s", status, raw)
+	}
+	var out apiv1.PollResponse
+	decode(f.t, raw, &out)
+	return out
+}
+
+func (f deviceFixture) report(token string, req apiv1.ReportRequest) (int, []byte) {
+	f.t.Helper()
+	return f.doWithAuth("Bearer "+token, http.MethodPost, "/v1/device/reports", req)
+}
+
+func reportFor(a *apiv1.DeviceAssignment, sequence int64, state rollout.AssignmentState) apiv1.ReportRequest {
+	return apiv1.ReportRequest{
+		Sequence:     sequence,
+		RolloutID:    a.RolloutID,
+		AssignmentID: a.ID,
+		Generation:   a.Generation,
+		State:        state,
+	}
+}
+
+func TestDeviceRoutesRequireADeviceToken(t *testing.T) {
+	f := newDeviceFixture(t)
+	for name, authorization := range map[string]string{
+		"missing":     "",
+		"unknown":     "Bearer frd_notarealtoken",
+		"admin token": "Bearer " + testAdminToken,
+		"empty":       "Bearer ",
+		"wrong type":  "Basic " + f.first,
+	} {
+		t.Run(name, func(t *testing.T) {
+			status, raw := f.on(t).doWithAuth(authorization, http.MethodPost, "/v1/device/poll", nil)
+			if status != http.StatusUnauthorized {
+				t.Fatalf("status = %d, body: %s", status, raw)
+			}
+		})
+	}
+}
+
+func TestDecommissioningADeviceRevokesItsToken(t *testing.T) {
+	h := newHarness(t)
+	h.createFleet("lab-a")
+	devices := h.registerDevices("lab-a", 2)
+	poll := func(token string) int {
+		status, _ := h.doWithAuth("Bearer "+token, http.MethodPost, "/v1/device/poll", nil)
+		return status
+	}
+	if got := poll(devices[0].Token); got != http.StatusOK {
+		t.Fatalf("before: status = %d", got)
+	}
+	h.expect(http.StatusOK, http.MethodPatch, "/v1/devices/"+devices[0].ID, `{"status":"decommissioned"}`, nil)
+	if got := poll(devices[0].Token); got != http.StatusUnauthorized {
+		t.Fatalf("after: status = %d, want its token revoked", got)
+	}
+	if got := poll(devices[1].Token); got != http.StatusOK {
+		t.Fatalf("another device: status = %d", got)
+	}
+}
+
+func TestPollReturnsAnAssignmentWithItsArtifactAndALease(t *testing.T) {
+	f := newDeviceFixture(t)
+	got := f.poll(f.first)
+	if got.PollAfterSeconds <= 0 {
+		t.Fatalf("poll_after_seconds = %d", got.PollAfterSeconds)
+	}
+	a := got.Assignment
+	if a == nil {
+		t.Fatal("no assignment for a device in the first stage")
+	}
+	if a.RolloutID != f.rollout.ID || a.Directive != rollout.DirectiveProceed || a.State != rollout.AssignmentAssigned || a.Stage != 1 {
+		t.Fatalf("assignment = %+v", a)
+	}
+	if a.Artifact.ID != f.rollout.ArtifactID || len(a.Artifact.SHA256) != 64 {
+		t.Fatalf("artifact = %+v", a.Artifact)
+	}
+	if a.ExpiresAt.IsZero() {
+		t.Fatal("no lease expiry")
+	}
+	if got := f.poll(f.later); got.Assignment != nil {
+		t.Fatalf("a later-stage device got %+v", got.Assignment)
+	}
+}
+
+func TestReportLifecycleAndStatusCounts(t *testing.T) {
+	f := newDeviceFixture(t)
+	a := f.poll(f.first).Assignment
+
+	for i, state := range []rollout.AssignmentState{rollout.AssignmentDownloading, rollout.AssignmentHealthCheck, rollout.AssignmentSucceeded} {
+		status, raw := f.report(f.first, reportFor(a, int64(i+1), state))
+		if status != http.StatusOK {
+			t.Fatalf("report %s: status = %d, body: %s", state, status, raw)
+		}
+		var result apiv1.ReportResponse
+		decode(t, raw, &result)
+		if !result.Applied {
+			t.Fatalf("report %s = %+v", state, result)
+		}
+	}
+
+	var r apiv1.Rollout
+	f.expect(http.StatusOK, http.MethodGet, "/v1/rollouts/"+f.rollout.ID, nil, &r)
+	if r.Stages[0].Succeeded != 1 || r.Stages[0].Pending != 1 {
+		t.Fatalf("first stage = %+v", r.Stages[0])
+	}
+	if !strings.Contains(r.Waiting, "coverage") {
+		t.Fatalf("waiting = %q", r.Waiting)
+	}
+	if got := f.poll(f.first); got.Assignment != nil {
+		t.Fatalf("a finished device got %+v", got.Assignment)
+	}
+}
+
+func TestDuplicateAndConflictingReports(t *testing.T) {
+	f := newDeviceFixture(t)
+	a := f.poll(f.first).Assignment
+	req := reportFor(a, 1, rollout.AssignmentFailed)
+
+	if status, raw := f.report(f.first, req); status != http.StatusOK {
+		t.Fatalf("first: status = %d, body: %s", status, raw)
+	}
+
+	status, raw := f.report(f.first, req)
+	if status != http.StatusOK {
+		t.Fatalf("repeat: status = %d, body: %s", status, raw)
+	}
+	var repeat apiv1.ReportResponse
+	decode(t, raw, &repeat)
+	if !repeat.Duplicate || repeat.Applied {
+		t.Fatalf("repeat = %+v", repeat)
+	}
+
+	var r apiv1.Rollout
+	f.expect(http.StatusOK, http.MethodGet, "/v1/rollouts/"+f.rollout.ID, nil, &r)
+	if r.Stages[0].Failed != 1 {
+		t.Fatalf("failed = %d, want 1 after a repeated report", r.Stages[0].Failed)
+	}
+
+	different := req
+	different.Reason = "something else"
+	status, raw = f.report(f.first, different)
+	if status != http.StatusConflict {
+		t.Fatalf("conflict: status = %d, body: %s", status, raw)
+	}
+	var problem apiv1.Problem
+	decode(t, raw, &problem)
+	if problem.Code != apiv1.CodeReportConflict {
+		t.Fatalf("code = %q", problem.Code)
+	}
+}
+
+func TestReportsAreBoundToTheAuthenticatedDevice(t *testing.T) {
+	f := newDeviceFixture(t)
+	a := f.poll(f.first).Assignment
+	f.poll(f.second)
+
+	// The second device can't touch the first device's assignment.
+	status, raw := f.report(f.second, reportFor(a, 1, rollout.AssignmentFailed))
+	if status != http.StatusNotFound {
+		t.Fatalf("status = %d, body: %s", status, raw)
+	}
+
+	wrong := reportFor(a, 1, rollout.AssignmentDownloading)
+	wrong.Generation = 2
+	status, raw = f.report(f.first, wrong)
+	if status != http.StatusConflict {
+		t.Fatalf("wrong generation: status = %d, body: %s", status, raw)
+	}
+	var problem apiv1.Problem
+	decode(t, raw, &problem)
+	if problem.Code != apiv1.CodeReportMismatch {
+		t.Fatalf("code = %q", problem.Code)
+	}
+}
+
+func TestReportValidation(t *testing.T) {
+	f := newDeviceFixture(t)
+	a := f.poll(f.first).Assignment
+	cases := map[string]func(*apiv1.ReportRequest){
+		"zero sequence":      func(r *apiv1.ReportRequest) { r.Sequence = 0 },
+		"negative sequence":  func(r *apiv1.ReportRequest) { r.Sequence = -1 },
+		"zero generation":    func(r *apiv1.ReportRequest) { r.Generation = 0 },
+		"bad rollout":        func(r *apiv1.ReportRequest) { r.RolloutID = "nope" },
+		"bad assignment":     func(r *apiv1.ReportRequest) { r.AssignmentID = "nope" },
+		"unreportable state": func(r *apiv1.ReportRequest) { r.State = rollout.AssignmentSuperseded },
+		"assigned state":     func(r *apiv1.ReportRequest) { r.State = rollout.AssignmentAssigned },
+		"unknown state":      func(r *apiv1.ReportRequest) { r.State = "exploded" },
+		"long reason":        func(r *apiv1.ReportRequest) { r.Reason = strings.Repeat("x", 1025) },
+		"NUL in reason":      func(r *apiv1.ReportRequest) { r.Reason = "a\x00b" },
+	}
+	for name, edit := range cases {
+		t.Run(name, func(t *testing.T) {
+			req := reportFor(a, 1, rollout.AssignmentDownloading)
+			edit(&req)
+			status, raw := f.on(t).report(f.first, req)
+			if status != http.StatusUnprocessableEntity {
+				t.Fatalf("status = %d, body: %s", status, raw)
+			}
+		})
+	}
+
+	status, _ := f.doWithAuth("Bearer "+f.first, http.MethodPost, "/v1/device/reports", `{"sequence":`)
+	if status != http.StatusBadRequest {
+		t.Fatalf("malformed JSON: status = %d", status)
+	}
+	oversized := `{"reason":"` + strings.Repeat("x", 128<<10) + `"}`
+	status, _ = f.doWithAuth("Bearer "+f.first, http.MethodPost, "/v1/device/reports", oversized)
+	if status != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized report: status = %d", status)
+	}
+}
+
+func TestStatusCountsDevicesInFlight(t *testing.T) {
+	f := newDeviceFixture(t)
+	a := f.poll(f.first).Assignment
+	if status, raw := f.report(f.first, reportFor(a, 1, rollout.AssignmentInstalling)); status != http.StatusOK {
+		t.Fatalf("report: status = %d, body: %s", status, raw)
+	}
+	var r apiv1.Rollout
+	f.expect(http.StatusOK, http.MethodGet, "/v1/rollouts/"+f.rollout.ID, nil, &r)
+	if r.Stages[0].InFlight != 1 {
+		t.Fatalf("in flight = %d", r.Stages[0].InFlight)
+	}
+}

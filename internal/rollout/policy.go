@@ -236,8 +236,13 @@ func (s SafetySpec) resolve(problems *violations) Safety {
 	out.OnBreach = OnBreachHalt
 	if s.OnBreach != "" {
 		out.OnBreach = s.OnBreach
-		if out.OnBreach != OnBreachHalt && out.OnBreach != OnBreachRollback {
-			problems.addf("safety.on_breach", "must be %q or %q, got %q", OnBreachHalt, OnBreachRollback, out.OnBreach)
+		switch out.OnBreach {
+		case OnBreachHalt:
+		case OnBreachRollback:
+			// Accepting this and then only halting would mislead the operator.
+			problems.addf("safety.on_breach", "%q isn't available yet; use %q", OnBreachRollback, OnBreachHalt)
+		default:
+			problems.addf("safety.on_breach", "must be %q, got %q", OnBreachHalt, out.OnBreach)
 		}
 	}
 	return out

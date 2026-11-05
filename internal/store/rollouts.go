@@ -34,6 +34,9 @@ const (
 	StageFailed  StageState = "failed"
 	// StageSkipped marks a stage that rounding left with no new devices.
 	StageSkipped StageState = "skipped"
+	// StageStopped marks a stage whose rollout stopped for a reason other than this
+	// stage's own results, such as an abort or a late failure in an earlier stage.
+	StageStopped StageState = "stopped"
 )
 
 // Stage is a stage's size and progress.
@@ -48,6 +51,15 @@ type Stage struct {
 	SoakStartedAt   *time.Time
 	SoakAccumulated time.Duration
 	FinishedAt      *time.Time
+
+	// Outcomes so far, derived from assignments each time they're read. A device
+	// in flight is also counted as pending or unknown.
+	Succeeded  int
+	Failed     int
+	Superseded int
+	InFlight   int
+	Unknown    int
+	Pending    int
 }
 
 // Rollout is a rollout's full status.
@@ -70,6 +82,12 @@ type Rollout struct {
 	FinishedAt   *time.Time
 	Stages       []Stage
 	Exclusions   map[rollout.ExclusionReason]int
+	// HaltReason and HaltDetail say why a rollout halted, if it did.
+	HaltReason *string
+	HaltDetail *string
+	// Waiting explains what an active rollout needs before it can move on, using the
+	// same evaluation the engine decides with.
+	Waiting string
 }
 
 // CreateRollout creates a draft. It rejects a policy that the fleet's currently
@@ -201,7 +219,7 @@ func (s *Store) GetRollout(ctx context.Context, id string) (Rollout, error) {
 	err := pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly},
 		func(tx pgx.Tx) error {
 			var err error
-			out, err = readRollout(ctx, tx, id)
+			out, err = readRollout(ctx, tx, id, s.now())
 			return err
 		})
 	if err != nil {
@@ -210,18 +228,18 @@ func (s *Store) GetRollout(ctx context.Context, id string) (Rollout, error) {
 	return out, nil
 }
 
-func readRollout(ctx context.Context, tx pgx.Tx, id string) (Rollout, error) {
+func readRollout(ctx context.Context, tx pgx.Tx, id string, now time.Time) (Rollout, error) {
 	r := Rollout{ID: id, Exclusions: map[rollout.ExclusionReason]int{}}
 	var digest []byte
 	err := tx.QueryRow(ctx, `
 		SELECT r.fleet_id, f.name, r.artifact_id, r.name, r.state, r.revision, r.policy, r.policy_digest,
 		       r.current_stage, r.member_count, r.paused_from, r.paused_at,
-		       r.created_at, r.started_at, r.finished_at
+		       r.created_at, r.started_at, r.finished_at, r.halt_reason, r.halt_detail
 		FROM rollouts r JOIN fleets f ON f.id = r.fleet_id
 		WHERE r.id = $1`, id).Scan(
 		&r.FleetID, &r.FleetName, &r.ArtifactID, &r.Name, &r.State, &r.Revision, &r.Policy, &digest,
 		&r.CurrentStage, &r.MemberCount, &r.PausedFrom, &r.PausedAt,
-		&r.CreatedAt, &r.StartedAt, &r.FinishedAt)
+		&r.CreatedAt, &r.StartedAt, &r.FinishedAt, &r.HaltReason, &r.HaltDetail)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Rollout{}, notFound("rollout", id)
 	}
@@ -251,6 +269,17 @@ func readRollout(ctx context.Context, tx pgx.Tx, id string) (Rollout, error) {
 		return Rollout{}, fmt.Errorf("query stages: %w", err)
 	}
 
+	if r.CurrentStage != nil {
+		staleBefore := now.Add(-r.Policy.Safety.StaleAfter.Std())
+		if err := readOutcomes(ctx, tx, id, *r.CurrentStage, staleBefore, r.Stages); err != nil {
+			return Rollout{}, err
+		}
+		switch r.State {
+		case rollout.StateRunning, rollout.StateSoaking, rollout.StatePaused:
+			r.Waiting = r.Policy.Evaluate(r.evaluation(now)).Waiting
+		}
+	}
+
 	rows, err = tx.Query(ctx, `SELECT reason, count(*) FROM rollout_exclusions WHERE rollout_id = $1 GROUP BY reason`, id)
 	if err != nil {
 		return Rollout{}, fmt.Errorf("query exclusions: %w", err)
@@ -264,6 +293,49 @@ func readRollout(ctx context.Context, tx pgx.Tx, id string) (Rollout, error) {
 		return Rollout{}, fmt.Errorf("query exclusions: %w", err)
 	}
 	return r, nil
+}
+
+// readOutcomes fills in the outcome counts of every exposed stage, deriving them
+// from assignments. A member with no assignment yet is included, so a device that
+// never polls can't vanish from the numbers. It's unknown once neither it nor the
+// stage's start has happened since staleBefore.
+func readOutcomes(ctx context.Context, tx pgx.Tx, id string, currentStage int, staleBefore time.Time, stages []Stage) error {
+	rows, err := tx.Query(ctx, `
+		SELECT m.stage_ordinal,
+		       count(*),
+		       count(*) FILTER (WHERE a.state = 'succeeded'),
+		       count(*) FILTER (WHERE a.state = 'failed'),
+		       count(*) FILTER (WHERE a.state = 'superseded'),
+		       count(*) FILTER (WHERE a.state IN ('installing', 'health_check', 'reverting')),
+		       count(*) FILTER (WHERE a.finished_at IS NULL AND GREATEST(d.last_seen_at, s.started_at) < $3)
+		FROM rollout_members m
+		JOIN devices d ON d.id = m.device_id
+		JOIN rollout_stages s ON s.rollout_id = m.rollout_id AND s.ordinal = m.stage_ordinal
+		LEFT JOIN assignments a ON a.rollout_id = m.rollout_id AND a.device_id = m.device_id AND a.kind = 'forward'
+		WHERE m.rollout_id = $1 AND m.stage_ordinal <= $2
+		GROUP BY m.stage_ordinal`, id, currentStage, staleBefore)
+	if err != nil {
+		return fmt.Errorf("query outcomes: %w", err)
+	}
+	var ordinal, cohort, succeeded, failed, superseded, inFlight, unknown int
+	_, err = pgx.ForEachRow(rows, []any{&ordinal, &cohort, &succeeded, &failed, &superseded, &inFlight, &unknown}, func() error {
+		for i := range stages {
+			if stages[i].Ordinal != ordinal {
+				continue
+			}
+			stages[i].Succeeded = succeeded
+			stages[i].Failed = failed
+			stages[i].Superseded = superseded
+			stages[i].InFlight = inFlight
+			stages[i].Unknown = unknown
+			stages[i].Pending = cohort - succeeded - failed - superseded - unknown
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("query outcomes: %w", err)
+	}
+	return nil
 }
 
 func loadArtifactTarget(ctx context.Context, tx pgx.Tx, artifactID string) (rollout.ArtifactTarget, error) {

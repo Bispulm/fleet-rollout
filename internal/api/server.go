@@ -27,6 +27,11 @@ type Options struct {
 	Ready      ReadinessCheck
 	Store      *store.Store
 	AdminToken string
+	// PollInterval is how often devices are told to poll.
+	PollInterval time.Duration
+	// AssignmentLease is how long a device may keep working on an assignment without
+	// hearing from the server.
+	AssignmentLease time.Duration
 }
 
 // Server is the HTTP API. It is safe for concurrent use.
@@ -38,6 +43,9 @@ type Server struct {
 	mux       *http.ServeMux
 	handler   http.Handler
 	draining  atomic.Bool
+
+	pollInterval    time.Duration
+	assignmentLease time.Duration
 }
 
 // New builds a Server with its routes registered.
@@ -47,6 +55,15 @@ func New(opts Options) *Server {
 		ready:  opts.Ready,
 		store:  opts.Store,
 		mux:    http.NewServeMux(),
+
+		pollInterval:    opts.PollInterval,
+		assignmentLease: opts.AssignmentLease,
+	}
+	if s.pollInterval == 0 {
+		s.pollInterval = defaultPollInterval
+	}
+	if s.assignmentLease == 0 {
+		s.assignmentLease = defaultAssignmentLease
 	}
 	s.handler = observe(s.logger, http.HandlerFunc(s.route))
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)

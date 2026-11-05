@@ -126,6 +126,14 @@ type Stage struct {
 	SoakStartedAt   *time.Time `json:"soak_started_at,omitempty"`
 	SoakAccumulated string     `json:"soak_accumulated"`
 	FinishedAt      *time.Time `json:"finished_at,omitempty"`
+	Succeeded       int        `json:"succeeded"`
+	Failed          int        `json:"failed"`
+	Superseded      int        `json:"superseded"`
+	// InFlight counts devices that have started installing and can't be recalled.
+	// They're also counted as pending or unknown.
+	InFlight int `json:"in_flight"`
+	Unknown  int `json:"unknown"`
+	Pending  int `json:"pending"`
 }
 
 // Rollout is a rollout's full status.
@@ -149,6 +157,11 @@ type Rollout struct {
 	Stages       []Stage        `json:"stages"`
 	// Exclusions counts fleet devices left out of the membership, by reason.
 	Exclusions map[rollout.ExclusionReason]int `json:"exclusions"`
+	// HaltReason and HaltDetail say why a rollout halted, if it did.
+	HaltReason string `json:"halt_reason,omitempty"`
+	HaltDetail string `json:"halt_detail,omitempty"`
+	// Waiting explains what an active rollout needs before it can move on.
+	Waiting string `json:"waiting,omitempty"`
 }
 
 // TransitionRequest is the optional body of a rollout state change. Set
@@ -182,9 +195,57 @@ type Transition struct {
 	Actor      string        `json:"actor"`
 	Reason     string        `json:"reason,omitempty"`
 	OccurredAt time.Time     `json:"occurred_at"`
+	// EngineGeneration is the leadership generation behind an engine's decision.
+	EngineGeneration *int64 `json:"engine_generation,omitempty"`
 }
 
 // TransitionLog is a rollout's audit log, oldest first.
 type TransitionLog struct {
 	Transitions []Transition `json:"transitions"`
 }
+
+// DeviceAssignment is what a device is told to do. A device must not begin installing
+// after ExpiresAt without polling again.
+type DeviceAssignment struct {
+	ID         string                  `json:"id"`
+	RolloutID  string                  `json:"rollout_id"`
+	Generation int64                   `json:"generation"`
+	Stage      int                     `json:"stage"`
+	State      rollout.AssignmentState `json:"state"`
+	Directive  rollout.Directive       `json:"directive"`
+	ExpiresAt  time.Time               `json:"expires_at"`
+	Artifact   Artifact                `json:"artifact"`
+}
+
+// PollResponse is the response to POST /v1/device/poll. Assignment is null when there's
+// nothing to do. A device holding an assignment that's no longer returned must abandon
+// it, unless it has already started installing.
+type PollResponse struct {
+	PollAfterSeconds int               `json:"poll_after_seconds"`
+	Assignment       *DeviceAssignment `json:"assignment"`
+}
+
+// ReportRequest is the body of POST /v1/device/reports. A retry must repeat it exactly,
+// with the same Sequence, which the device persists before sending.
+type ReportRequest struct {
+	Sequence     int64                   `json:"sequence"`
+	RolloutID    string                  `json:"rollout_id"`
+	AssignmentID string                  `json:"assignment_id"`
+	Generation   int64                   `json:"generation"`
+	State        rollout.AssignmentState `json:"state"`
+	Reason       string                  `json:"reason,omitempty"`
+}
+
+// ReportResponse says what became of a report. All of these are final, and none of
+// them should be retried.
+type ReportResponse struct {
+	Applied       bool   `json:"applied"`
+	Duplicate     bool   `json:"duplicate,omitempty"`
+	IgnoredReason string `json:"ignored_reason,omitempty"`
+}
+
+// The problem codes for device reports. Both mean a retry can't succeed.
+const (
+	CodeReportConflict = "report_conflict"
+	CodeReportMismatch = "report_mismatch"
+)

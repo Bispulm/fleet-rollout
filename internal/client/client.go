@@ -233,3 +233,28 @@ func (c *Client) ListTransitions(ctx context.Context, id string) ([]apiv1.Transi
 	err := c.do(ctx, http.MethodGet, "/v1/rollouts/"+segment(id)+"/transitions", nil, nil, &out)
 	return out.Transitions, err
 }
+
+// DeviceClient calls the API that devices use. It carries one device's token, so it
+// can only act as that device.
+type DeviceClient struct {
+	client *Client
+}
+
+// NewDevice returns a client for one device.
+func NewDevice(baseURL, token string, httpClient *http.Client) *DeviceClient {
+	return &DeviceClient{client: New(baseURL, token, httpClient)}
+}
+
+// Poll asks for the device's current assignment, and records that it was heard from.
+func (c *DeviceClient) Poll(ctx context.Context) (apiv1.PollResponse, error) {
+	var out apiv1.PollResponse
+	err := c.client.do(ctx, http.MethodPost, "/v1/device/poll", nil, nil, &out)
+	return out, err
+}
+
+// Report sends a status update. A retry must repeat the same request exactly.
+func (c *DeviceClient) Report(ctx context.Context, req apiv1.ReportRequest) (apiv1.ReportResponse, error) {
+	var out apiv1.ReportResponse
+	err := c.client.do(ctx, http.MethodPost, "/v1/device/reports", nil, req, &out)
+	return out, err
+}

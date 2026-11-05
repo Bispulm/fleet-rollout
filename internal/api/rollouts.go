@@ -154,6 +154,8 @@ func (s *Server) handleListTransitions(w http.ResponseWriter, r *http.Request) e
 			Actor:      entry.Actor,
 			Reason:     entry.Reason,
 			OccurredAt: entry.OccurredAt,
+
+			EngineGeneration: entry.EngineGeneration,
 		}
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -186,9 +188,25 @@ func rolloutDocument(r store.Rollout) apiv1.Rollout {
 			SoakStartedAt:   st.SoakStartedAt,
 			SoakAccumulated: st.SoakAccumulated.String(),
 			FinishedAt:      st.FinishedAt,
+			Succeeded:       st.Succeeded,
+			Failed:          st.Failed,
+			Superseded:      st.Superseded,
+			InFlight:        st.InFlight,
+			Unknown:         st.Unknown,
+			Pending:         st.Pending,
 		}
 	}
+	var haltReason, haltDetail string
+	if r.HaltReason != nil {
+		haltReason = *r.HaltReason
+	}
+	if r.HaltDetail != nil {
+		haltDetail = *r.HaltDetail
+	}
 	return apiv1.Rollout{
+		HaltReason:   haltReason,
+		HaltDetail:   haltDetail,
+		Waiting:      r.Waiting,
 		ID:           r.ID,
 		FleetID:      r.FleetID,
 		Fleet:        r.FleetName,

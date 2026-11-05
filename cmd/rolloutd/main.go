@@ -3,6 +3,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +20,7 @@ import (
 	"github.com/Bispulm/fleet-rollout/internal/api"
 	"github.com/Bispulm/fleet-rollout/internal/config"
 	"github.com/Bispulm/fleet-rollout/internal/db"
+	"github.com/Bispulm/fleet-rollout/internal/engine"
 	"github.com/Bispulm/fleet-rollout/internal/store"
 )
 
@@ -87,11 +90,14 @@ func runMigrate(ctx context.Context, pool *pgxpool.Pool, stdout io.Writer) error
 }
 
 func runServe(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, e env) error {
+	st := store.New(pool)
 	server := api.New(api.Options{
-		Logger:     logger,
-		Ready:      func(ctx context.Context) error { return db.CheckReady(ctx, pool) },
-		Store:      store.New(pool),
-		AdminToken: cfg.AdminToken,
+		Logger:          logger,
+		Ready:           func(ctx context.Context) error { return db.CheckReady(ctx, pool) },
+		Store:           st,
+		AdminToken:      cfg.AdminToken,
+		PollInterval:    cfg.PollInterval,
+		AssignmentLease: cfg.AssignmentLease,
 	})
 
 	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", cfg.ListenAddr)
@@ -102,9 +108,64 @@ func runServe(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger
 	if e.onListening != nil {
 		e.onListening(listener.Addr())
 	}
-	if err := server.Serve(ctx, listener, cfg.ShutdownTimeout); err != nil {
+
+	stopEngine, err := startEngine(ctx, cfg, st, logger)
+	if err != nil {
+		_ = listener.Close()
 		return err
+	}
+	serveErr := server.Serve(ctx, listener, cfg.ShutdownTimeout)
+	// Both stop when ctx ends. This waits for the engine, before the pool closes.
+	stopEngine()
+	if serveErr != nil {
+		return serveErr
 	}
 	logger.LogAttrs(context.WithoutCancel(ctx), slog.LevelInfo, "stopped")
 	return nil
+}
+
+// startEngine runs the rollout engine in the background, and returns a function that
+// stops it and waits for it to give up its lease.
+func startEngine(ctx context.Context, cfg config.Config, st *store.Store, logger *slog.Logger) (func(), error) {
+	if !cfg.EngineEnabled {
+		logger.LogAttrs(ctx, slog.LevelInfo, "rollout engine disabled")
+		return func() {}, nil
+	}
+	holder, err := engineHolder()
+	if err != nil {
+		return nil, err
+	}
+	engineCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	rolloutEngine := engine.New(engine.Options{
+		Store:    st,
+		Holder:   holder,
+		Interval: cfg.EngineInterval,
+		LeaseTTL: cfg.EngineLeaseTTL,
+		Logger:   logger,
+	})
+	go func() {
+		defer close(done)
+		if err := rolloutEngine.Run(engineCtx); err != nil {
+			logger.LogAttrs(engineCtx, slog.LevelError, "rollout engine stopped", slog.Any("error", err))
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+	}, nil
+}
+
+// engineHolder names this process in the engine lease. The random part keeps a
+// restarted process from being mistaken for its previous self.
+func engineHolder() (string, error) {
+	suffix := make([]byte, 4)
+	if _, err := rand.Read(suffix); err != nil {
+		return "", fmt.Errorf("generate engine holder ID: %w", err)
+	}
+	host, err := os.Hostname()
+	if err != nil {
+		host = "unknown"
+	}
+	return host + "-" + hex.EncodeToString(suffix), nil
 }

@@ -130,7 +130,7 @@ rollout, so it's safe to retry.`,
 	flags.StringVar(&f.coverage, "required-coverage", "", "share of a cohort that must report an outcome (default 90%)")
 	flags.StringVar(&f.maxUnknown, "max-unknown", "", "largest share of a cohort allowed to be unknown at promotion (default 5%)")
 	flags.DurationVar(&f.staleAfter, "stale-after", 0, "silence after which a device counts as unknown (default 15m)")
-	flags.StringVar(&f.onBreach, "on-breach", "", "action when a threshold is crossed: halt or rollback (default halt)")
+	flags.StringVar(&f.onBreach, "on-breach", "", "action when a threshold is crossed; only halt is available so far (default halt)")
 	flags.StringArrayVar(&f.selector, "selector", nil, "only include devices with this label, as key=value; repeatable")
 	flags.StringArrayVar(&f.exclude, "exclude-device", nil, "leave this device out; repeatable")
 	mustMarkRequired(cmd, "fleet", "name", "artifact", "stages", "max-failure-rate")
@@ -356,6 +356,12 @@ func (a *app) printRollout(r apiv1.Rollout) error {
 	row("Fleet", r.Fleet)
 	row("Artifact", r.ArtifactID)
 	row("State", string(r.State))
+	if r.Waiting != "" {
+		row("Waiting", r.Waiting)
+	}
+	if r.HaltReason != "" {
+		row("Halted", r.HaltReason+": "+r.HaltDetail)
+	}
 	row("Revision", strconv.FormatInt(r.Revision, 10))
 	if r.MemberCount != nil {
 		row("Members", strconv.Itoa(*r.MemberCount))
@@ -377,15 +383,16 @@ func (a *app) printRollout(r apiv1.Rollout) error {
 		return err
 	}
 	stages := a.table()
-	_, _ = fmt.Fprintln(stages, "STAGE\tPERCENT\tTARGET\tNEW\tMIN OBS\tSOAK\tSTATE\tDEADLINE")
+	_, _ = fmt.Fprintln(stages, "STAGE\tPERCENT\tTARGET\tNEW\tMIN OBS\tSOAK\tSTATE\tOK\tFAILED\tIN FLIGHT\tPENDING\tUNKNOWN\tDEADLINE")
 	for i, st := range r.Stages {
 		spec := r.Policy.Stages[i]
 		deadline := "-"
 		if st.DeadlineAt != nil {
 			deadline = st.DeadlineAt.Format(timeLayout)
 		}
-		_, _ = fmt.Fprintf(stages, "%d\t%d%%\t%s\t%s\t%d\t%s\t%s\t%s\n", st.Ordinal, st.Percent,
-			optionalInt(st.TargetCount), optionalInt(st.CohortSize), spec.MinObservations, spec.Soak.Std(), st.State, deadline)
+		_, _ = fmt.Fprintf(stages, "%d\t%d%%\t%s\t%s\t%d\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%s\n", st.Ordinal, st.Percent,
+			optionalInt(st.TargetCount), optionalInt(st.CohortSize), spec.MinObservations, spec.Soak.Std(), st.State,
+			st.Succeeded, st.Failed, st.InFlight, st.Pending, st.Unknown, deadline)
 	}
 	return stages.Flush()
 }

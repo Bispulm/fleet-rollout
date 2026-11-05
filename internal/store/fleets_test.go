@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"slices"
@@ -30,6 +31,7 @@ func newDevices(n int) []store.NewDevice {
 			Platform: "linux/arm64",
 			Labels:   map[string]string{"site": "lab"},
 		}
+		devices[i].CredentialHash = sha256.Sum256([]byte(devices[i].ID))
 	}
 	return devices
 }
