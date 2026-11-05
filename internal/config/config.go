@@ -12,7 +12,10 @@ import (
 )
 
 const (
-	defaultListenAddr        = "127.0.0.1:18100"
+	defaultListenAddr  = "127.0.0.1:18100"
+	defaultMetricsAddr = "127.0.0.1:18102"
+	// metricsOff turns the metrics listener off.
+	metricsOff               = "off"
 	defaultShutdownTimeout   = 15 * time.Second
 	defaultDBMaxConns        = 16
 	minAdminTokenLength      = 16
@@ -29,7 +32,9 @@ const (
 
 // Config holds the settings for the rolloutd server.
 type Config struct {
-	ListenAddr      string
+	ListenAddr string
+	// MetricsAddr is where Prometheus metrics are served, or empty for nowhere.
+	MetricsAddr     string
 	DatabaseURL     string
 	AdminToken      string
 	LogLevel        slog.Level
@@ -54,6 +59,7 @@ type Config struct {
 func Load(getenv func(string) string) (Config, error) {
 	cfg := Config{
 		ListenAddr:      defaultListenAddr,
+		MetricsAddr:     defaultMetricsAddr,
 		LogLevel:        slog.LevelInfo,
 		ShutdownTimeout: defaultShutdownTimeout,
 		DBMaxConns:      defaultDBMaxConns,
@@ -84,8 +90,20 @@ func Load(getenv func(string) string) (Config, error) {
 		cfg.ListenAddr = v
 	}
 	allowNonLoopback := getenv("ROLLOUTD_ALLOW_NON_LOOPBACK") == "true"
-	if err := checkListenAddr(cfg.ListenAddr, allowNonLoopback); err != nil {
+	if err := checkListenAddr("ROLLOUTD_LISTEN_ADDR", cfg.ListenAddr, allowNonLoopback); err != nil {
 		problems = append(problems, err)
+	}
+	switch v := getenv("ROLLOUTD_METRICS_ADDR"); v {
+	case "":
+	case metricsOff:
+		cfg.MetricsAddr = ""
+	default:
+		cfg.MetricsAddr = v
+	}
+	if cfg.MetricsAddr != "" {
+		if err := checkListenAddr("ROLLOUTD_METRICS_ADDR", cfg.MetricsAddr, allowNonLoopback); err != nil {
+			problems = append(problems, err)
+		}
 	}
 
 	if v := getenv("ROLLOUTD_LOG_LEVEL"); v != "" {
@@ -197,11 +215,12 @@ func (cfg *Config) loadTiming(getenv func(string) string) []error {
 }
 
 // checkListenAddr refuses addresses reachable from other machines unless the
-// operator opts in, because the server does not terminate TLS itself.
-func checkListenAddr(addr string, allowNonLoopback bool) error {
+// operator opts in, because the server does not terminate TLS itself. name is the variable that
+// set addr, for the error.
+func checkListenAddr(name, addr string, allowNonLoopback bool) error {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
-		return fmt.Errorf("ROLLOUTD_LISTEN_ADDR: %q is not host:port", addr)
+		return fmt.Errorf("%s: %q is not host:port", name, addr)
 	}
 	if allowNonLoopback || host == "localhost" {
 		return nil
@@ -209,5 +228,5 @@ func checkListenAddr(addr string, allowNonLoopback bool) error {
 	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
 		return nil
 	}
-	return fmt.Errorf("ROLLOUTD_LISTEN_ADDR: %q is not a loopback address; set ROLLOUTD_ALLOW_NON_LOOPBACK=true to allow it", addr)
+	return fmt.Errorf("%s: %q is not a loopback address; set ROLLOUTD_ALLOW_NON_LOOPBACK=true to allow it", name, addr)
 }

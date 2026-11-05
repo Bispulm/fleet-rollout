@@ -212,10 +212,10 @@ func fleetBusy(active string) error {
 
 func writeMembership(ctx context.Context, tx pgx.Tx, id string, m rollout.Membership) error {
 	_, err := tx.CopyFrom(ctx, pgx.Identifier{"rollout_members"},
-		[]string{"rollout_id", "device_id", "position", "stage_ordinal", "rank_key"},
+		[]string{"rollout_id", "device_id", "position", "stage_ordinal", "rank_key", "prior_release"},
 		pgx.CopyFromSlice(len(m.Members), func(i int) ([]any, error) {
 			member := m.Members[i]
-			return []any{id, member.DeviceID, member.Position, member.Stage, member.Key[:]}, nil
+			return []any{id, member.DeviceID, member.Position, member.Stage, member.Key[:], member.PriorRelease}, nil
 		}))
 	if err != nil {
 		return fmt.Errorf("write members: %w", err)

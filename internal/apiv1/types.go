@@ -119,6 +119,20 @@ type CreateRolloutRequest struct {
 	Policy     rollout.PolicySpec `json:"policy"`
 }
 
+// RollbackProgress is how far a rollback has got. Needed counts devices whose install
+// succeeded, Restored those that have confirmed a rollback, and Unresolved the rest. Failed and
+// InFlight count the current attempt's rollback assignments.
+type RollbackProgress struct {
+	Attempt         int        `json:"attempt"`
+	DeadlineAt      *time.Time `json:"deadline_at,omitempty"`
+	Needed          int        `json:"needed"`
+	Restored        int        `json:"restored"`
+	Failed          int        `json:"failed"`
+	InFlight        int        `json:"in_flight"`
+	Unresolved      int        `json:"unresolved"`
+	ForwardInFlight int        `json:"forward_in_flight"`
+}
+
 // Stage is a stage's size and progress.
 type Stage struct {
 	Ordinal         int        `json:"ordinal"`
@@ -167,6 +181,10 @@ type Rollout struct {
 	HaltDetail string `json:"halt_detail,omitempty"`
 	// Waiting explains what an active rollout needs before it can move on.
 	Waiting string `json:"waiting,omitempty"`
+	// Rollback is the rollback's progress, once one has started.
+	Rollback *RollbackProgress `json:"rollback,omitempty"`
+	// FailureReasons counts the devices whose install failed, by the reason they gave.
+	FailureReasons map[string]int `json:"failure_reasons,omitempty"`
 }
 
 // TransitionRequest is the optional body of a rollout state change. Set
@@ -221,6 +239,9 @@ type DeviceAssignment struct {
 	Directive  rollout.Directive       `json:"directive"`
 	Kind       string                  `json:"kind"`
 	Artifact   Artifact                `json:"artifact"`
+	// RestoreRelease is the release a rollback assignment restores: the one the device ran
+	// before this rollout. A forward assignment doesn't have one.
+	RestoreRelease *int64 `json:"restore_release,omitempty"`
 }
 
 // PollResponse is the response to POST /v1/device/poll. Assignment is null when there's

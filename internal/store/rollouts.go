@@ -85,6 +85,10 @@ type Rollout struct {
 	// HaltReason and HaltDetail say why a rollout halted, if it did.
 	HaltReason *string
 	HaltDetail *string
+	// Rollback is the rollback's progress, once one has started.
+	Rollback *RollbackProgress
+	// FailureReasons counts the devices whose install failed, by the reason they gave.
+	FailureReasons map[string]int
 	// Waiting explains what an active rollout needs before it can move on, using the
 	// same evaluation the engine decides with.
 	Waiting string
@@ -219,7 +223,11 @@ func (s *Store) GetRollout(ctx context.Context, id string) (Rollout, error) {
 	err := pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly},
 		func(tx pgx.Tx) error {
 			var err error
-			out, err = readRollout(ctx, tx, id, s.now())
+			if out, err = readRollout(ctx, tx, id, s.now()); err != nil {
+				return err
+			}
+			// Only people read these, so the engine's reads, which hold the rollout's lock, skip them.
+			out.FailureReasons, err = readFailureReasons(ctx, tx, id)
 			return err
 		})
 	if err != nil {
@@ -231,15 +239,19 @@ func (s *Store) GetRollout(ctx context.Context, id string) (Rollout, error) {
 func readRollout(ctx context.Context, tx pgx.Tx, id string, now time.Time) (Rollout, error) {
 	r := Rollout{ID: id, Exclusions: map[rollout.ExclusionReason]int{}}
 	var digest []byte
+	var rollbackAttempt int
+	var rollbackDeadline *time.Time
 	err := tx.QueryRow(ctx, `
 		SELECT r.fleet_id, f.name, r.artifact_id, r.name, r.state, r.revision, r.policy, r.policy_digest,
 		       r.current_stage, r.member_count, r.paused_from, r.paused_at,
-		       r.created_at, r.started_at, r.finished_at, r.halt_reason, r.halt_detail
+		       r.created_at, r.started_at, r.finished_at, r.halt_reason, r.halt_detail,
+		       r.rollback_attempt, r.rollback_deadline_at
 		FROM rollouts r JOIN fleets f ON f.id = r.fleet_id
 		WHERE r.id = $1`, id).Scan(
 		&r.FleetID, &r.FleetName, &r.ArtifactID, &r.Name, &r.State, &r.Revision, &r.Policy, &digest,
 		&r.CurrentStage, &r.MemberCount, &r.PausedFrom, &r.PausedAt,
-		&r.CreatedAt, &r.StartedAt, &r.FinishedAt, &r.HaltReason, &r.HaltDetail)
+		&r.CreatedAt, &r.StartedAt, &r.FinishedAt, &r.HaltReason, &r.HaltDetail,
+		&rollbackAttempt, &rollbackDeadline)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Rollout{}, notFound("rollout", id)
 	}
@@ -277,6 +289,15 @@ func readRollout(ctx context.Context, tx pgx.Tx, id string, now time.Time) (Roll
 		switch r.State {
 		case rollout.StateRunning, rollout.StateSoaking, rollout.StatePaused:
 			r.Waiting = r.Policy.Evaluate(r.evaluation(now)).Waiting
+		}
+	}
+	if rollbackAttempt > 0 {
+		if r.Rollback, err = readRollback(ctx, tx, id, rollbackAttempt, rollbackDeadline); err != nil {
+			return Rollout{}, err
+		}
+		switch r.State {
+		case rollout.StateRollingBack, rollout.StateRollbackIncomplete:
+			r.Waiting = rollbackWaiting(r.State, *r.Rollback)
 		}
 	}
 
@@ -369,4 +390,67 @@ func loadCandidates(ctx context.Context, tx pgx.Tx, fleetID string) ([]rollout.C
 		return nil, fmt.Errorf("query devices: %w", err)
 	}
 	return candidates, nil
+}
+
+// RecentRollouts returns every rollout that has started and hasn't finished, and those that
+// finished within the window, oldest first. Metrics report them.
+func (s *Store) RecentRollouts(ctx context.Context, window time.Duration) ([]Rollout, error) {
+	var out []Rollout
+	err := s.inTx(ctx, func(tx pgx.Tx) error {
+		now := s.now()
+		rows, err := tx.Query(ctx, `
+			SELECT id FROM rollouts
+			WHERE state <> 'draft' AND (finished_at IS NULL OR finished_at > $1)
+			ORDER BY started_at, id`, now.Add(-window))
+		if err != nil {
+			return fmt.Errorf("query recent rollouts: %w", err)
+		}
+		ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return fmt.Errorf("query recent rollouts: %w", err)
+		}
+		out = make([]Rollout, 0, len(ids))
+		for _, id := range ids {
+			r, err := readRollout(ctx, tx, id, now)
+			if err != nil {
+				return err
+			}
+			out = append(out, r)
+		}
+		return nil
+	})
+	return out, err
+}
+
+// maxFailureReasons bounds how many reasons are listed. Reasons are whatever devices send, so the
+// rest are counted together as other.
+const maxFailureReasons = 10
+
+// readFailureReasons counts failed forward installs by the reason each device reported, from the
+// failure report the server applied.
+func readFailureReasons(ctx context.Context, tx pgx.Tx, id string) (map[string]int, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT coalesce(nullif(left(e.payload->>'reason', 64), ''), 'unspecified'), count(DISTINCT a.id)
+		FROM assignments a
+		JOIN device_events e ON e.assignment_id = a.id AND e.type = 'failed' AND e.applied
+		WHERE a.rollout_id = $1 AND a.kind = 'forward' AND a.state = 'failed'
+		GROUP BY 1
+		ORDER BY 2 DESC, 1`, id)
+	if err != nil {
+		return nil, fmt.Errorf("query failure reasons: %w", err)
+	}
+	out := map[string]int{}
+	var reason string
+	var count int
+	if _, err := pgx.ForEachRow(rows, []any{&reason, &count}, func() error {
+		if len(out) < maxFailureReasons {
+			out[reason] += count
+		} else {
+			out["other"] += count
+		}
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("query failure reasons: %w", err)
+	}
+	return out, nil
 }

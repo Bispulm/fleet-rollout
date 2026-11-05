@@ -227,3 +227,24 @@ func TestLoadDeviceLimits(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadMetricsAddress(t *testing.T) {
+	cfg, err := Load(env(nil))
+	if err != nil || cfg.MetricsAddr != "127.0.0.1:18102" {
+		t.Fatalf("default = %q, %v", cfg.MetricsAddr, err)
+	}
+	if cfg, err = Load(env(map[string]string{"ROLLOUTD_METRICS_ADDR": "off"})); err != nil || cfg.MetricsAddr != "" {
+		t.Fatalf("off = %q, %v", cfg.MetricsAddr, err)
+	}
+	// Each error names the one variable that's wrong.
+	for _, addr := range []string{"0.0.0.0:18102", "no-port"} {
+		_, err = Load(env(map[string]string{"ROLLOUTD_METRICS_ADDR": addr}))
+		if err == nil || !strings.Contains(err.Error(), "\nROLLOUTD_METRICS_ADDR: ") || strings.Contains(err.Error(), "LISTEN_ADDR") {
+			t.Fatalf("metrics address %q: error = %v", addr, err)
+		}
+	}
+	cfg, err = Load(env(map[string]string{"ROLLOUTD_METRICS_ADDR": "0.0.0.0:18102", "ROLLOUTD_ALLOW_NON_LOOPBACK": "true"}))
+	if err != nil || cfg.MetricsAddr != "0.0.0.0:18102" {
+		t.Fatalf("with permission = %q, %v", cfg.MetricsAddr, err)
+	}
+}

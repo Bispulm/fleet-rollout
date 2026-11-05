@@ -1529,3 +1529,188 @@ func TestRunStopsWhenTheContextEnds(t *testing.T) {
 		t.Fatal("Run didn't stop")
 	}
 }
+
+// rollbackTo makes the server's assignment a rollback of the fixture's release, to restore.
+func (f *fixture) rollbackTo(restore int64) {
+	f.t.Helper()
+	a := assignmentFor(f.server.manifest)
+	a.ID, a.Kind, a.Generation, a.RestoreRelease = "rollback-1", "rollback", 2, &restore
+	f.server.assignment = a
+	f.server.reports = nil
+	f.clock.now = f.clock.now.Add(2 * testPoll)
+}
+
+// newRelease puts a later release on the server, assigned to the device.
+func (f *fixture) newRelease(release int64, id string) {
+	f.t.Helper()
+	meta := testMeta()
+	meta.ReleaseCounter, meta.Version = release, fmt.Sprintf("1.%d.0", release)
+	content := bytes.Repeat([]byte(fmt.Sprintf("release %d bytes", release)), 300)
+	manifest, envelope := signingtest.Signed(f.t, f.signer, meta, content)
+	f.server.manifest, f.server.envelope, f.server.content = manifest, envelope, content
+	a := assignmentFor(manifest)
+	a.ID = id
+	f.server.assignment = a
+	f.clock.now = f.clock.now.Add(2 * testPoll)
+}
+
+func TestARollbackRestoresTheReleaseItShippedWith(t *testing.T) {
+	f := newFixture(t)
+	shipped := f.agent.Checkpoint()
+	f.runToIdle()
+
+	f.rollbackTo(0)
+	f.runToIdle()
+	cp := f.agent.Checkpoint()
+	if cp.Active.Release != 0 || cp.ActiveSlot != shipped.ActiveSlot {
+		t.Fatalf("active = %+v in slot %s, want release 0 back in slot %s", cp.Active, cp.ActiveSlot, shipped.ActiveSlot)
+	}
+	want := []rollout.AssignmentState{rollout.AssignmentInstalling, rollout.AssignmentHealthCheck, rollout.AssignmentSucceeded}
+	if got := f.server.accepted(); !slices.Equal(got, want) {
+		t.Fatalf("accepted = %v, want %v", got, want)
+	}
+	if f.installer.Installs() != 1 {
+		t.Fatalf("installs = %d; a rollback switches slots, and installs nothing", f.installer.Installs())
+	}
+}
+
+func TestARollbackHealthChecksAReleaseItInstalled(t *testing.T) {
+	f := newFixture(t)
+	f.runToIdle()
+	first := f.agent.Checkpoint()
+	f.newRelease(testRelease+1, "assignment-2")
+	f.runToIdle()
+	if got := f.agent.Checkpoint().Active.Release; got != testRelease+1 {
+		t.Fatalf("active release = %d after the second update", got)
+	}
+
+	f.rollbackTo(testRelease)
+	f.runToIdle()
+	cp := f.agent.Checkpoint()
+	if cp.Active != first.Active || cp.ActiveSlot != first.ActiveSlot {
+		t.Fatalf("active = %+v in %s, want %+v in %s", cp.Active, cp.ActiveSlot, first.Active, first.ActiveSlot)
+	}
+	if got := f.installer.Content(cp.ActiveSlot); !bytes.Equal(got, testContent()) {
+		t.Fatal("the restored slot doesn't hold the first release")
+	}
+}
+
+func TestARollbackToAnUnhealthyReleaseLeavesTheDeviceAsItIs(t *testing.T) {
+	f := newFixture(t)
+	f.runToIdle()
+	f.newRelease(testRelease+1, "assignment-2")
+	f.runToIdle()
+	before := f.agent.Checkpoint()
+
+	f.installer.FailHealth(errors.New("the old release won't start"))
+	f.rollbackTo(testRelease)
+	f.runToIdle()
+	if cp := f.agent.Checkpoint(); cp.Active != before.Active || cp.ActiveSlot != before.ActiveSlot {
+		t.Fatalf("active = %+v in %s, want it unchanged", cp.Active, cp.ActiveSlot)
+	}
+	if got := f.server.last(); got.State != rollout.AssignmentFailed || got.Reason != agent.ReasonRestoreUnhealthy {
+		t.Fatalf("last report = %+v", got)
+	}
+}
+
+func TestARollbackWithNothingToRestoreFails(t *testing.T) {
+	f := newFixture(t)
+	f.runToIdle()
+	f.rollbackTo(5) // It never ran release 5.
+	f.runToIdle()
+	if got := f.server.last(); got.State != rollout.AssignmentFailed || got.Reason != agent.ReasonNothingToRestore {
+		t.Fatalf("last report = %+v", got)
+	}
+	if got := f.agent.Checkpoint().Active.Release; got != testRelease {
+		t.Fatalf("active release = %d, want it unchanged", got)
+	}
+}
+
+func TestARollbackOfADeviceAlreadyRestoredConfirmsIt(t *testing.T) {
+	f := newFixture(t)
+	f.rollbackTo(0) // It's still on what it shipped with.
+	f.runToIdle()
+	want := []rollout.AssignmentState{rollout.AssignmentHealthCheck, rollout.AssignmentSucceeded}
+	if got := f.server.accepted(); !slices.Equal(got, want) {
+		t.Fatalf("accepted = %v, want %v", got, want)
+	}
+}
+
+func TestARollbackSurvivesACrashAtEveryBoundary(t *testing.T) {
+	for target := 0; ; target++ {
+		f := newFixture(t)
+		f.runToIdle()
+		installed := f.agent.Checkpoint()
+		f.rollbackTo(0)
+
+		counter := &boundaryCounter{target: target}
+		deps := f.deps()
+		deps.Checkpoints = crashingCheckpoints{f.checkpoints, counter}
+		deps.Installer = crashingInstaller{f.installer, counter}
+		a, err := agent.New(f.config, deps)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		crashed := func() (crashed bool) {
+			defer func() {
+				if v := recover(); v != nil {
+					if _, ok := v.(crash); !ok {
+						panic(v)
+					}
+					crashed = true
+				}
+			}()
+			for range 200 {
+				wait, err := a.Step(f.ctx)
+				if err != nil {
+					t.Fatalf("Step: %v", err)
+				}
+				f.clock.now = f.clock.now.Add(wait)
+				if cp := a.Checkpoint(); cp.Work == nil && len(cp.Outbox) == 0 && f.server.assignment == nil {
+					return false
+				}
+			}
+			t.Fatalf("target %d: the rollback never finished", target)
+			return false
+		}()
+		if !crashed {
+			if target < 3 {
+				t.Fatalf("only %d boundaries were reached", target)
+			}
+			return
+		}
+		f.restart()
+		f.runUntil("rolled back", func() bool {
+			cp := f.agent.Checkpoint()
+			return cp.Work == nil && len(cp.Outbox) == 0 && f.server.assignment == nil
+		})
+		cp := f.agent.Checkpoint()
+		if cp.Active.Release != 0 || cp.ActiveSlot == installed.ActiveSlot {
+			t.Fatalf("crash %d (%s): active = %+v in %s, want the shipped release restored", target, counter.fired, cp.Active, cp.ActiveSlot)
+		}
+		if got := f.server.last(); got.State != rollout.AssignmentSucceeded {
+			t.Fatalf("crash %d (%s): last report = %+v", target, counter.fired, got)
+		}
+	}
+}
+
+func TestARollbackOfAReleaseItIsntRunningFails(t *testing.T) {
+	f := newFixture(t)
+	rolledBack := f.server.manifest
+	// It went straight from what it shipped with to a later release, from another rollout.
+	f.newRelease(testRelease+1, "assignment-other")
+	f.runToIdle()
+
+	a := assignmentFor(rolledBack)
+	restore := int64(0)
+	a.ID, a.Kind, a.Generation, a.RestoreRelease = "rollback-1", "rollback", 2, &restore
+	f.server.assignment, f.server.reports = a, nil
+	f.clock.now = f.clock.now.Add(2 * testPoll)
+	f.runToIdle()
+	if got := f.server.last(); got.State != rollout.AssignmentFailed || got.Reason != agent.ReasonNothingToRestore {
+		t.Fatalf("last report = %+v", got)
+	}
+	if got := f.agent.Checkpoint().Active.Release; got != testRelease+1 {
+		t.Fatalf("active release = %d, want the later release kept", got)
+	}
+}

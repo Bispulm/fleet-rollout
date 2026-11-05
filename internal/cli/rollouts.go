@@ -44,6 +44,7 @@ func (a *app) rolloutCommand() *cobra.Command {
 		a.rolloutActionCommand(client.ActionPause, "Stop forward progress and the soak and deadline clocks"),
 		a.rolloutActionCommand(client.ActionResume, "Return a paused rollout to where it was"),
 		a.rolloutActionCommand(client.ActionAbort, "Finish a rollout without rolling back"),
+		a.rolloutActionCommand(client.ActionRollback, "Restore what each updated device ran before, or try again after an incomplete rollback"),
 		a.rolloutCohortCommand(),
 		a.rolloutHistoryCommand(),
 	)
@@ -52,7 +53,7 @@ func (a *app) rolloutCommand() *cobra.Command {
 
 type createFlags struct {
 	fleet, name, artifact, id, stages, minObservations string
-	soak, deadline, staleAfter                         time.Duration
+	soak, deadline, staleAfter, rollbackDeadline       time.Duration
 	maxFailure, rolloutMaxFailure                      string
 	coverage, maxUnknown, onBreach                     string
 	selector, exclude                                  []string
@@ -102,7 +103,8 @@ rollout, so it's safe to retry.`,
 	flags.StringVar(&f.coverage, "required-coverage", "", "share of a cohort that must report an outcome (default 90%)")
 	flags.StringVar(&f.maxUnknown, "max-unknown", "", "largest share of a cohort allowed to be unknown at promotion (default 5%)")
 	flags.DurationVar(&f.staleAfter, "stale-after", 0, "silence after which a device counts as unknown (default 15m)")
-	flags.StringVar(&f.onBreach, "on-breach", "", "action when a threshold is crossed; only halt is available so far (default halt)")
+	flags.StringVar(&f.onBreach, "on-breach", "", "action when a threshold is crossed: halt, or rollback to halt and restore what devices ran before (default halt)")
+	flags.DurationVar(&f.rollbackDeadline, "rollback-deadline", 0, "how long a rollback may take before it's marked incomplete (default 1h)")
 	flags.StringArrayVar(&f.selector, "selector", nil, "only include devices with this label, as key=value; repeatable")
 	flags.StringArrayVar(&f.exclude, "exclude-device", nil, "leave this device out; repeatable")
 	mustMarkRequired(cmd, "fleet", "name", "artifact", "stages", "max-failure-rate")
@@ -182,6 +184,10 @@ func (f createFlags) request(cmd *cobra.Command) (apiv1.CreateRolloutRequest, er
 	if changed("stale-after") {
 		staleAfter := rollout.Duration(f.staleAfter)
 		safety.StaleAfter = &staleAfter
+	}
+	if changed("rollback-deadline") {
+		deadline := rollout.Duration(f.rollbackDeadline)
+		safety.RollbackDeadline = &deadline
 	}
 
 	selector, err := parseLabels("selector", f.selector)
@@ -334,6 +340,17 @@ func (a *app) printRollout(r apiv1.Rollout) error {
 	if r.HaltReason != "" {
 		row("Halted", r.HaltReason+": "+r.HaltDetail)
 	}
+	if len(r.FailureReasons) > 0 {
+		row("Failures", formatCounts(r.FailureReasons))
+	}
+	if rb := r.Rollback; rb != nil {
+		line := fmt.Sprintf("attempt %d: %d of %d devices restored, %d failed, %d unresolved",
+			rb.Attempt, rb.Restored, rb.Needed, rb.Failed, rb.Unresolved)
+		if rb.DeadlineAt != nil && r.State == rollout.StateRollingBack {
+			line += ", deadline " + rb.DeadlineAt.Format(timeLayout)
+		}
+		row("Rollback", line)
+	}
 	row("Revision", strconv.FormatInt(r.Revision, 10))
 	if r.MemberCount != nil {
 		row("Members", strconv.Itoa(*r.MemberCount))
@@ -381,6 +398,25 @@ func formatExclusions(counts map[rollout.ExclusionReason]int) string {
 	parts := make([]string, len(reasons))
 	for i, reason := range reasons {
 		parts[i] = fmt.Sprintf("%s=%d", reason, counts[reason])
+	}
+	return strings.Join(parts, ", ")
+}
+
+// formatCounts lists counts by name, most first.
+func formatCounts(counts map[string]int) string {
+	names := make([]string, 0, len(counts))
+	for name := range counts {
+		names = append(names, name)
+	}
+	slices.SortFunc(names, func(a, b string) int {
+		if counts[a] != counts[b] {
+			return counts[b] - counts[a]
+		}
+		return strings.Compare(a, b)
+	})
+	parts := make([]string, len(names))
+	for i, name := range names {
+		parts[i] = fmt.Sprintf("%s %d", name, counts[name])
 	}
 	return strings.Join(parts, ", ")
 }

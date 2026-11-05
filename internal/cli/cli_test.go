@@ -545,7 +545,7 @@ func TestStatusExplainsProgressAndHalts(t *testing.T) {
 	}
 
 	status := e.mustRun("rollout", "status", r.ID)
-	for _, want := range []string{"halted", "Halted:", "stage_breach", "FAILED", "failed"} {
+	for _, want := range []string{"halted", "Halted:", "stage_breach", "FAILED", "failed", "Failures:", "health check failed 1"} {
 		if !strings.Contains(status, want) {
 			t.Errorf("status is missing %q:\n%s", want, status)
 		}
@@ -556,5 +556,50 @@ func TestStatusExplainsProgressAndHalts(t *testing.T) {
 	history := e.mustRun("rollout", "history", r.ID)
 	if !strings.Contains(history, "breach") || !strings.Contains(history, "engine") {
 		t.Errorf("history doesn't show the engine's decision:\n%s", history)
+	}
+}
+
+func TestARollbackFromTheCommandLine(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun("fleet", "create", "lab-a")
+	file := filepath.Join(t.TempDir(), "a.bin")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	artifact := mustJSON[apiv1.Artifact](e, "artifact", "push", "--name", "demo", "--version", "1.0.0",
+		"--platform", "linux/arm64", "--release", "4", "--file", file, "--key", e.key)
+	registered := mustJSON[apiv1.DeviceList](e, "device", "register", "--fleet", "lab-a", "--id", "bench-1",
+		"--platform", "linux/arm64", "--installed-release", "3")
+	r := mustJSON[apiv1.Rollout](e, "rollout", "create", "--fleet", "lab-a", "--name", "demo", "--artifact", artifact.ID,
+		"--stages", "100", "--max-failure-rate", "2%", "--rollback-deadline", "20m")
+	if got := r.Policy.Safety.RollbackDeadline.Std(); got != 20*time.Minute {
+		t.Fatalf("rollback deadline = %v", got)
+	}
+	e.mustRun("rollout", "start", r.ID)
+
+	// The device installs the release.
+	device := client.NewDevice(e.base, registered.Devices[0].Token, nil)
+	polled, err := device.Poll(t.Context())
+	if err != nil || polled.Assignment == nil {
+		t.Fatalf("Poll = %+v, err = %v", polled, err)
+	}
+	a := polled.Assignment
+	for i, state := range []rollout.AssignmentState{rollout.AssignmentInstalling, rollout.AssignmentHealthCheck, rollout.AssignmentSucceeded} {
+		if _, err := device.Report(t.Context(), apiv1.ReportRequest{
+			Sequence: int64(i + 1), RolloutID: a.RolloutID, AssignmentID: a.ID, Generation: a.Generation, State: state,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	e.mustRun("rollout", "rollback", r.ID, "--reason", "customers report crashes")
+	status := e.mustRun("rollout", "status", r.ID)
+	if !strings.Contains(status, "rolling_back") || !strings.Contains(status, "attempt 1: 0 of 1 devices restored") {
+		t.Fatalf("status doesn't show the rollback:\n%s", status)
+	}
+	polled, err = device.Poll(t.Context())
+	if err != nil || polled.Assignment == nil || polled.Assignment.Kind != "rollback" ||
+		polled.Assignment.RestoreRelease == nil || *polled.Assignment.RestoreRelease != 3 {
+		t.Fatalf("Poll = %+v, err = %v; want a rollback to release 3", polled.Assignment, err)
 	}
 }

@@ -102,6 +102,15 @@ func statusFrom(r apiv1.Rollout) v1alpha1.RolloutStatus {
 		HaltDetail:   r.HaltDetail,
 		Stages:       make([]v1alpha1.StageStatus, len(r.Stages)),
 	}
+	if rb := r.Rollback; rb != nil {
+		out.Rollback = &v1alpha1.RollbackStatus{
+			Attempt: rb.Attempt, Needed: rb.Needed, Restored: rb.Restored, Failed: rb.Failed, Unresolved: rb.Unresolved,
+		}
+		if rb.DeadlineAt != nil {
+			deadline := metav1.NewTime(*rb.DeadlineAt)
+			out.Rollback.Deadline = &deadline
+		}
+	}
 	for i, stage := range r.Stages {
 		out.Stages[i] = v1alpha1.StageStatus{
 			Ordinal: stage.Ordinal, Percent: stage.Percent, State: stage.State, Cohort: stage.CohortSize,

@@ -85,6 +85,9 @@ type Member struct {
 	// Stage is the 1-based stage that first exposes this device.
 	Stage int
 	Key   [sha256.Size]byte
+	// PriorRelease is the release the device ran when membership froze, which a rollback
+	// restores.
+	PriorRelease int64
 }
 
 // ExcludedDevice records a fleet device left out of a rollout, and why.
@@ -105,12 +108,14 @@ type Membership struct {
 func (p Policy) Freeze(rolloutID string, target ArtifactTarget, candidates []Candidate) (Membership, error) {
 	var eligible []string
 	var exclusions []ExcludedDevice
+	prior := make(map[string]int64, len(candidates))
 	for _, c := range candidates {
 		if reason := p.Exclusion(c, target); reason != "" {
 			exclusions = append(exclusions, ExcludedDevice{DeviceID: c.ID, Reason: reason})
 			continue
 		}
 		eligible = append(eligible, c.ID)
+		prior[c.ID] = c.InstalledRelease
 	}
 
 	plan, err := p.Plan(len(eligible))
@@ -126,10 +131,11 @@ func (p Policy) Freeze(rolloutID string, target ArtifactTarget, candidates []Can
 	members := make([]Member, len(ranked))
 	for i, r := range ranked {
 		members[i] = Member{
-			DeviceID: r.DeviceID,
-			Position: r.Position,
-			Stage:    StageOfPosition(r.Position, targets),
-			Key:      r.Key,
+			DeviceID:     r.DeviceID,
+			Position:     r.Position,
+			Stage:        StageOfPosition(r.Position, targets),
+			Key:          r.Key,
+			PriorRelease: prior[r.DeviceID],
 		}
 	}
 	slices.SortFunc(exclusions, func(a, b ExcludedDevice) int { return cmp.Compare(a.DeviceID, b.DeviceID) })

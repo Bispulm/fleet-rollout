@@ -20,6 +20,8 @@ Use the standard library unless a dependency clearly earns its place.
 | Logging | `log/slog` | Structured logging is in the standard library. |
 | Integration tests | Plain `pgx` against a server from Compose or CI | `testcontainers-go` would add a large dependency tree to save a few lines, and the local container runtime needs extra configuration for it. |
 | Kubernetes operator | `controller-runtime` and the Kubernetes client libraries | Watches, caches, leader election, and status updates are what an operator is. They're imported only by the operator's packages, and the CRD types depend on `k8s.io/apimachinery` alone (ADR 0010). |
+| Metrics | `prometheus/client_golang` | The exposition format, histograms, and the runtime and process collectors are what every Prometheus setup expects (ADR 0012). |
+| Traces | OpenTelemetry SDK, its OTLP exporter, and `otelhttp` | The standard API and wire format, so traces go to whatever backend an operator runs. Off unless an endpoint is set. |
 | CRD and deep copy generation | `controller-gen`, pinned, run with `go run` | Writing CRD schemas and deep copy methods by hand drifts from the types. It isn't a module dependency. |
 
 Each test creates its own database through `internal/testdb`, so tests can run in parallel without

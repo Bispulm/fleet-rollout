@@ -52,6 +52,20 @@ dev-up: ## Start local Postgres
 dev-down: ## Stop local Postgres, keeping its data
 	docker compose down
 
+.PHONY: image
+image: ## Build the container image fleet-rollout:dev
+	docker build -t fleet-rollout:dev .
+
+.PHONY: obs-up
+obs-up: image ## Run rolloutd with Prometheus, Grafana, and Jaeger (needs ROLLOUT_ADMIN_TOKEN and release.pub)
+	@test -n "$(ROLLOUT_ADMIN_TOKEN)" || { echo "set ROLLOUT_ADMIN_TOKEN first" >&2; exit 1; }
+	@test -f "$(or $(ROLLOUT_TRUST_KEYS),release.pub)" || { echo "make a signing key first, with rolloutctl key generate" >&2; exit 1; }
+	docker compose --profile observability up -d --wait
+
+.PHONY: obs-down
+obs-down: ## Stop the observability profile, keeping its data
+	docker compose --profile observability down
+
 .PHONY: dev-reset
-dev-reset: ## Stop local Postgres and delete this project's data volume
-	docker compose down --volumes
+dev-reset: ## Stop everything and delete this project's data volumes
+	docker compose --profile observability down --volumes

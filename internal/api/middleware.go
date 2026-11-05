@@ -9,6 +9,11 @@ import (
 	"regexp"
 	"runtime/debug"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/Bispulm/fleet-rollout/internal/metrics"
 )
 
 const requestIDHeader = "X-Request-Id"
@@ -51,7 +56,7 @@ func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter 
 
 // observe assigns a request ID, recovers from panics, and writes the access log.
 // Panics are logged in full but never reach the client.
-func observe(logger *slog.Logger, next http.Handler) http.Handler {
+func observe(logger *slog.Logger, m *metrics.Metrics, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		id := r.Header.Get(requestIDHeader)
@@ -75,6 +80,13 @@ func observe(logger *slog.Logger, next http.Handler) http.Handler {
 				if rec.status == 0 {
 					writeProblem(rec, http.StatusInternalServerError, "")
 				}
+			}
+			m.Request(r.Pattern, r.Method, rec.status, time.Since(start))
+			if span := trace.SpanFromContext(r.Context()); span.IsRecording() {
+				if r.Pattern != "" {
+					span.SetName(r.Pattern)
+				}
+				span.SetAttributes(attribute.String("request_id", id))
 			}
 			logger.LogAttrs(r.Context(), slog.LevelInfo, "request",
 				slog.String("request_id", id),

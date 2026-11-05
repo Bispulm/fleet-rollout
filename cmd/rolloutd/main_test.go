@@ -54,6 +54,7 @@ func testEnv(t *testing.T, dbURL string) func(string) string {
 		"ROLLOUTD_DATABASE_URL":    dbURL,
 		"ROLLOUTD_ADMIN_TOKEN":     strings.Repeat("x", 32),
 		"ROLLOUTD_LISTEN_ADDR":     "127.0.0.1:0",
+		"ROLLOUTD_METRICS_ADDR":    "127.0.0.1:0",
 		"ROLLOUTD_TRUST_KEYS_FILE": trustFile,
 		"ROLLOUTD_ARTIFACT_DIR":    t.TempDir(),
 	}
@@ -166,6 +167,7 @@ func serveForTest(t *testing.T) (*served, func() error) {
 		"ROLLOUTD_DATABASE_URL":     dbURL,
 		"ROLLOUTD_ADMIN_TOKEN":      adminToken,
 		"ROLLOUTD_LISTEN_ADDR":      "127.0.0.1:0",
+		"ROLLOUTD_METRICS_ADDR":     "127.0.0.1:0",
 		"ROLLOUTD_ENGINE_INTERVAL":  "20ms",
 		"ROLLOUTD_ENGINE_LEASE_TTL": "2s",
 		"ROLLOUTD_TRUST_KEYS_FILE":  trustFile,
@@ -369,6 +371,7 @@ func TestServeRefusesAMissingOrEmptyTrustList(t *testing.T) {
 				"ROLLOUTD_DATABASE_URL":    dbURL,
 				"ROLLOUTD_ADMIN_TOKEN":     strings.Repeat("x", 32),
 				"ROLLOUTD_LISTEN_ADDR":     "127.0.0.1:0",
+				"ROLLOUTD_METRICS_ADDR":    "127.0.0.1:0",
 				"ROLLOUTD_TRUST_KEYS_FILE": path,
 				"ROLLOUTD_ARTIFACT_DIR":    t.TempDir(),
 			}
@@ -387,6 +390,7 @@ func TestServeCanRunWithoutTheEngine(t *testing.T) {
 		"ROLLOUTD_DATABASE_URL":    dbURL,
 		"ROLLOUTD_ADMIN_TOKEN":     strings.Repeat("x", 32),
 		"ROLLOUTD_LISTEN_ADDR":     "127.0.0.1:0",
+		"ROLLOUTD_METRICS_ADDR":    "127.0.0.1:0",
 		"ROLLOUTD_ENGINE_ENABLED":  "false",
 		"ROLLOUTD_TRUST_KEYS_FILE": trustFile,
 		"ROLLOUTD_ARTIFACT_DIR":    t.TempDir(),
@@ -415,5 +419,57 @@ func TestServeCanRunWithoutTheEngine(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), "became engine leader") {
 		t.Fatalf("an engine ran while disabled:\n%s", logs.String())
+	}
+}
+
+func TestMetricsAreServedOnTheirOwnAddress(t *testing.T) {
+	dbURL := testdb.NewURL(t)
+	getenv := testEnv(t, dbURL)
+	if err := run(t.Context(), []string{"migrate"}, env{getenv: getenv, stdout: io.Discard, stderr: io.Discard}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	listening, metricsAt := make(chan net.Addr, 1), make(chan net.Addr, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- run(ctx, []string{"serve"}, env{
+			getenv: getenv, stdout: io.Discard, stderr: io.Discard,
+			onListening: func(addr net.Addr) { listening <- addr },
+			onMetrics:   func(addr net.Addr) { metricsAt <- addr },
+		})
+	}()
+	var api, metricsBase string
+	for api == "" || metricsBase == "" {
+		select {
+		case addr := <-listening:
+			api = "http://" + addr.String()
+		case addr := <-metricsAt:
+			metricsBase = "http://" + addr.String()
+		case err := <-done:
+			t.Fatalf("serve exited early: %v", err)
+		case <-time.After(10 * time.Second):
+			t.Fatal("server did not start")
+		}
+	}
+
+	httpStatus(t, api+"/healthz")
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, metricsBase+"/metrics", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	for _, want := range []string{`fleet_rollout_http_requests_total{code="200",method="GET",route="GET /healthz"} 1`, "fleet_rollout_engine_leader", "fleet_rollout_rollout_scrape_errors 0"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("metrics lack %q", want)
+		}
+	}
+	if got := httpStatus(t, api+"/metrics"); got != http.StatusNotFound {
+		t.Errorf("the API port serves /metrics with status %d; they belong on their own address", got)
 	}
 }

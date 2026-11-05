@@ -4,12 +4,19 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+
 	"github.com/Bispulm/fleet-rollout/internal/engine"
+	"github.com/Bispulm/fleet-rollout/internal/metrics"
 	"github.com/Bispulm/fleet-rollout/internal/rollout"
 	"github.com/Bispulm/fleet-rollout/internal/store"
 )
@@ -26,6 +33,8 @@ type fakeStore struct {
 	// steps is how many times each rollout reports a change before settling.
 	steps      map[string]int
 	advanceErr map[string]error
+	// result, if set, is what each change reports.
+	result *store.AdvanceResult
 
 	acquired int
 	renewed  int
@@ -74,6 +83,9 @@ func (f *fakeStore) AdvanceRollout(_ context.Context, id string, _ store.Fence) 
 	}
 	if f.steps[id] > 0 {
 		f.steps[id]--
+		if f.result != nil {
+			return *f.result, nil
+		}
 		return store.AdvanceResult{Changed: true, Event: rollout.EventCoverageMet}, nil
 	}
 	return store.AdvanceResult{}, nil
@@ -255,5 +267,94 @@ func TestRunWithoutTheLeaseReleasesNothing(t *testing.T) {
 	defer f.mu.Unlock()
 	if len(f.released) != 0 {
 		t.Fatalf("released a lease it didn't hold: %v", f.released)
+	}
+}
+
+func TestDecisionsHaltsAndLeadershipAreCounted(t *testing.T) {
+	f := &fakeStore{acquireOK: true, rollouts: []string{"r1"}, steps: map[string]int{"r1": 1},
+		result: &store.AdvanceResult{
+			Changed: true, Event: rollout.EventBreach, HaltReason: rollout.HaltStageBreach, RolledBack: true,
+		}}
+	m := metrics.New()
+	e := engine.New(engine.Options{
+		Store: f, Holder: "test", Interval: time.Millisecond, LeaseTTL: time.Minute,
+		Logger: slog.New(slog.DiscardHandler), Metrics: m,
+	})
+	e.Tick(t.Context())
+
+	scrape := func() string {
+		rec := httptest.NewRecorder()
+		m.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", nil))
+		return rec.Body.String()
+	}
+	body := scrape()
+	for _, want := range []string{
+		`fleet_rollout_engine_decisions_total{event="breach"} 1`,
+		`fleet_rollout_engine_decisions_total{event="rollback"} 1`,
+		`fleet_rollout_rollout_halts_total{reason="stage_breach"} 1`,
+		"fleet_rollout_engine_leader 1",
+	} {
+		if !strings.Contains(body, want+"\n") {
+			t.Errorf("metrics lack %q", want)
+		}
+	}
+
+	f.mu.Lock()
+	f.renewErr = errors.New("connection reset")
+	f.mu.Unlock()
+	e.Tick(t.Context())
+	if body := scrape(); !strings.Contains(body, "fleet_rollout_engine_leader 0\n") {
+		t.Error("an instance that lost the lease still reports leading")
+	}
+}
+
+func TestGivingUpTheLeaseStopsReportingLeadership(t *testing.T) {
+	f := &fakeStore{acquireOK: true}
+	m := metrics.New()
+	e := engine.New(engine.Options{
+		Store: f, Holder: "test", Interval: time.Hour, LeaseTTL: time.Minute,
+		Logger: slog.New(slog.DiscardHandler), Metrics: m,
+	})
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- e.Run(ctx) }()
+	// The first tick runs at once, and takes the lease.
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(scrapeMetrics(t, m), "fleet_rollout_engine_leader 1\n") {
+		if time.Now().After(deadline) {
+			t.Fatal("the engine never took the lease")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if body := scrapeMetrics(t, m); !strings.Contains(body, "fleet_rollout_engine_leader 0\n") {
+		t.Error("an instance that gave up the lease on the way out still reports leading")
+	}
+}
+
+func scrapeMetrics(t *testing.T, m *metrics.Metrics) string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", nil))
+	return rec.Body.String()
+}
+
+func TestEachEvaluationIsTraced(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	f := &fakeStore{acquireOK: true, rollouts: []string{"r1"}, steps: map[string]int{"r1": 1}}
+	e := engine.New(engine.Options{
+		Store: f, Holder: "test", Interval: time.Millisecond, LeaseTTL: time.Minute,
+		Logger: slog.New(slog.DiscardHandler), Tracer: sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)),
+	})
+	e.Tick(t.Context())
+	spans := recorder.Ended()
+	if len(spans) != 1 || spans[0].Name() != "engine.advance" {
+		t.Fatalf("spans = %d, want one engine.advance", len(spans))
+	}
+	if events := spans[0].Events(); len(events) != 1 || events[0].Name != string(rollout.EventCoverageMet) {
+		t.Fatalf("events = %+v, want the decision", events)
 	}
 }

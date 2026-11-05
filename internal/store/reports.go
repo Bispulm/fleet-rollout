@@ -65,6 +65,8 @@ type openReportedAssignment struct {
 	lastSequence int64
 	release      int64
 	rolloutState rollout.State
+	// restore is what a rollback assignment restores.
+	restore *int64
 }
 
 // RecordReport applies a device's report. Every new report goes into the event log,
@@ -178,13 +180,15 @@ func lockRolloutForClaim(ctx context.Context, tx pgx.Tx, r Report) error {
 func lockReportedAssignment(ctx context.Context, tx pgx.Tx, r Report) (openReportedAssignment, error) {
 	var a openReportedAssignment
 	err := tx.QueryRow(ctx, `
-		SELECT a.device_id, a.rollout_id, a.generation, a.kind, a.state, a.last_sequence, ar.release_counter, ro.state
+		SELECT a.device_id, a.rollout_id, a.generation, a.kind, a.state, a.last_sequence, ar.release_counter, ro.state,
+		       a.restore_release
 		FROM assignments a
 		JOIN rollouts ro ON ro.id = a.rollout_id
 		JOIN artifacts ar ON ar.id = ro.artifact_id
 		WHERE a.id = $1
 		FOR UPDATE OF a`, r.AssignmentID).Scan(
-		&a.deviceID, &a.rolloutID, &a.generation, &a.kind, &a.state, &a.lastSequence, &a.release, &a.rolloutState)
+		&a.deviceID, &a.rolloutID, &a.generation, &a.kind, &a.state, &a.lastSequence, &a.release, &a.rolloutState,
+		&a.restore)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && a.deviceID != r.DeviceID) {
 		return a, notFound("assignment", r.AssignmentID)
 	}
@@ -224,11 +228,18 @@ func applyReport(ctx context.Context, tx pgx.Tx, current openReportedAssignment,
 	if err != nil {
 		return fmt.Errorf("update assignment: %w", err)
 	}
-	if r.State == rollout.AssignmentSucceeded && current.kind == "forward" {
+	switch {
+	case r.State != rollout.AssignmentSucceeded:
+	case current.kind == "forward":
 		_, err := tx.Exec(ctx, `UPDATE devices SET installed_release = GREATEST(installed_release, $2) WHERE id = $1`,
 			r.DeviceID, current.release)
 		if err != nil {
 			return fmt.Errorf("record installed release: %w", err)
+		}
+	case current.restore != nil:
+		// A rollback is the one time a device's release goes down, to exactly what it had.
+		if _, err := tx.Exec(ctx, `UPDATE devices SET installed_release = $2 WHERE id = $1`, r.DeviceID, *current.restore); err != nil {
+			return fmt.Errorf("record restored release: %w", err)
 		}
 	}
 	return nil

@@ -17,6 +17,11 @@ const (
 	sqlRestrictViolation = "23001"
 )
 
+func isSQLState(err error, want string) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == want
+}
+
 func requireSQLState(t *testing.T, err error, want string) {
 	t.Helper()
 	var pgErr *pgconn.PgError
@@ -295,8 +300,8 @@ func TestDeviceHasAtMostOneOpenAssignment(t *testing.T) {
 	f := exposedFixture(t, ctx)
 	assignRollback := func() error {
 		_, err := f.pool.Exec(ctx, `INSERT INTO assignments
-			(rollout_id, device_id, generation, kind, stage_ordinal, issued_at)
-			VALUES ($1, $2, 2, 'rollback', 1, now())`, f.rolloutID, f.deviceID)
+			(rollout_id, device_id, generation, kind, stage_ordinal, issued_at, restore_release)
+			VALUES ($1, $2, 2, 'rollback', 1, now(), 0)`, f.rolloutID, f.deviceID)
 		return err
 	}
 
@@ -365,14 +370,38 @@ func TestMemberHasAtMostOneForwardAssignmentPerRollout(t *testing.T) {
 	}
 	mustExec(t, ctx, f.pool, `UPDATE assignments SET state = 'failed', finished_at = now() WHERE id = $1`, first)
 
-	// A second generation would count this device's outcome twice.
-	_, err = f.assign(ctx, 2)
+	// A second one would count this device's outcome twice.
+	_, err = f.assign(ctx, 1)
 	requireSQLState(t, err, sqlUniqueViolation)
+	// Forward assignments are always generation 1, so a later one can't slip past that.
+	_, err = f.assign(ctx, 2)
+	requireSQLState(t, err, sqlCheckViolation)
 
-	// A rollback is a different kind of instruction, so it's allowed.
+	// A rollback is a different kind of instruction, so it's allowed, with what to restore.
 	mustExec(t, ctx, f.pool, `INSERT INTO assignments
-		(rollout_id, device_id, generation, kind, stage_ordinal, issued_at)
-		VALUES ($1, $2, 2, 'rollback', 1, now())`, f.rolloutID, f.deviceID)
+		(rollout_id, device_id, generation, kind, stage_ordinal, issued_at, restore_release)
+		VALUES ($1, $2, 2, 'rollback', 1, now(), 0)`, f.rolloutID, f.deviceID)
+}
+
+func TestRollbackAssignmentsSayWhatToRestore(t *testing.T) {
+	ctx := testContext(t)
+	f := exposedFixture(t, ctx)
+	for name, insert := range map[string]string{
+		"a rollback without a release to restore": `INSERT INTO assignments
+			(rollout_id, device_id, generation, kind, stage_ordinal, issued_at)
+			VALUES ($1, $2, 2, 'rollback', 1, now())`,
+		"a forward assignment with one": `INSERT INTO assignments
+			(rollout_id, device_id, generation, kind, stage_ordinal, issued_at, restore_release)
+			VALUES ($1, $2, 1, 'forward', 1, now(), 3)`,
+		"a rollback at the forward generation": `INSERT INTO assignments
+			(rollout_id, device_id, generation, kind, stage_ordinal, issued_at, restore_release)
+			VALUES ($1, $2, 1, 'rollback', 1, now(), 0)`,
+	} {
+		_, err := f.pool.Exec(ctx, insert, f.rolloutID, f.deviceID)
+		if !isSQLState(err, sqlCheckViolation) {
+			t.Errorf("%s: error = %v, want a check violation", name, err)
+		}
+	}
 }
 
 func TestDeviceCredentialsAreUnique(t *testing.T) {

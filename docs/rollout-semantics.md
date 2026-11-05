@@ -162,6 +162,22 @@ stage's counters:
   same way.
 - A late success can't undo a halt. Halts are cleared by an operator, not by more data arriving.
 
+### Devices that go quiet
+
+A device that hasn't been heard from for `stale_after` counts as unknown. Unknown devices aren't failures, and
+they aren't successes:
+
+- They don't count toward a stage's failure rate. A release that bricks devices, so they never report again, isn't
+  hidden by this, because the next rule catches it.
+- More than `max_unknown_bps` of a stage, or of the rollout, unknown blocks promotion. Waiting can't pass a stage
+  whose devices have gone silent.
+- A stage that can't pass by its deadline halts with `stage_deadline`, and the detail gives the unknown count, so a
+  release that takes devices offline halts on time rather than waiting forever.
+- Polling counts as being heard from, so a device holding during a long pause doesn't turn unknown.
+
+A separate failure limit for unknown devices was considered and left out: the deadline already bounds how long
+silence can last, and treating silence as failure would halt good releases whenever part of a fleet is offline.
+
 ### Halted rollouts
 
 A halted rollout doesn't resume. The operator either rolls back or aborts, and a fresh rollout
@@ -170,7 +186,7 @@ part of the rollout's record.
 
 ## States and transitions
 
-**Status: Implemented,** except for the rollback events, which the table allows but nothing issues yet.
+**Status: Implemented.**
 
 | From | Event | To |
 |---|---|---|
@@ -365,12 +381,54 @@ stages big enough that one interrupted install doesn't decide them. The simulato
 
 ## Rollback
 
-**Status: Specified.** Until it's built, a policy with `on_breach: rollback` is rejected at creation rather
-than accepted and silently treated as a halt.
+**Status: Implemented,** as [ADR 0011](adr/0011-rollback.md) describes.
 
 An authorized rollback tells each exposed device to restore the healthy version it recorded before
 this rollout. It doesn't disable downgrade protection in general: the authorization is scoped to one
 assignment. A rollout reaches `rolled_back` only when every exposed device has confirmed. Offline
 devices and failed reversions stay listed as unresolved in `rollback_incomplete`.
+
+### Starting
+
+`rollback` is allowed from `running`, `soaking`, `paused`, `halted`, and `rollback_incomplete`. With `on_breach:
+rollback`, a breach halts the rollout and rolls it back in one transaction, and the audit log shows both. Starting a
+rollback:
+
+1. Supersedes forward assignments that haven't reached installation, so no new device installs the release.
+2. Stops the current stage, which keeps any verdict it already had.
+3. Starts a new rollback attempt, with a deadline of `rollback_deadline` from now, an hour by default.
+
+### Who rolls back
+
+Each member records the release it ran when membership froze. A member needs a rollback if its forward assignment
+succeeded. A device whose forward assignment is still in flight finishes first, and then needs one if it succeeded.
+Devices that failed already reverted, and devices never reached never changed. A decommissioned device can't poll,
+so it can't take part, and isn't counted.
+
+A device that needs a rollback gets a rollback assignment when it polls: kind `rollback`, with the release to restore,
+and a generation of one more than the attempt number, so the first attempt uses generation 2. A rollback assignment
+follows the same report rules as a forward one, including asking permission with `installing`.
+
+### What a device does
+
+| The device is running | It does |
+|---|---|
+| The rollout's release, with its previous slot holding the release to restore | Asks permission, health-checks the previous slot, switches to it, and reports `succeeded` |
+| The release to restore already | Reports `succeeded`, since there's nothing to undo |
+| Anything else, or its previous slot holds some other release | Reports `failed` with `nothing_to_restore` |
+
+The release a device shipped with was never installed by the agent, so there's nothing in its slot to check. Restoring
+it switches back without a slot health check.
+
+### Finishing
+
+The engine moves a rollback to `rolled_back` once every device that needed one has a succeeded rollback assignment,
+and no forward install is still in flight. `rolled_back` is terminal, and frees the fleet. On success, each device's
+installed release returns to the one it had before.
+
+If the deadline passes first, the rollout moves to `rollback_incomplete`. Rollback assignments that haven't reached
+installation are superseded, and the status lists the devices still unresolved. Rolling back again starts a new
+attempt, which offers a rollback to every member that needed one and hasn't been restored. Aborting leaves the
+devices as they are.
 
 Rolling back a rollout that has already `completed` isn't supported in v1.

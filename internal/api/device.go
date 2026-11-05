@@ -37,15 +37,15 @@ type deviceHandlerFunc func(http.ResponseWriter, *http.Request, store.Device) er
 // device wraps a handler with device authentication and a request deadline. It's
 // separate from admin authentication, and neither credential works on the other's routes.
 func (s *Server) device(next deviceHandlerFunc) http.Handler {
-	return s.deviceWithSlots(s.deviceSlots, next)
+	return s.deviceWithSlots(s.deviceSlots, "requests", next)
 }
 
 // deviceDownload is device for artifact downloads, which take slots from their own pool.
 func (s *Server) deviceDownload(next deviceHandlerFunc) http.Handler {
-	return s.deviceWithSlots(s.downloadSlots, next)
+	return s.deviceWithSlots(s.downloadSlots, "downloads", next)
 }
 
-func (s *Server) deviceWithSlots(slots chan struct{}, next deviceHandlerFunc) http.Handler {
+func (s *Server) deviceWithSlots(slots chan struct{}, pool string, next deviceHandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Taking a slot comes before anything that costs a database query, so that a
 		// reconnecting fleet can't queue more work than the server can take on.
@@ -53,6 +53,7 @@ func (s *Server) deviceWithSlots(slots chan struct{}, next deviceHandlerFunc) ht
 		case slots <- struct{}{}:
 			defer func() { <-slots }()
 		default:
+			s.metrics.Shed(pool)
 			w.Header().Set("Retry-After", strconv.Itoa(minRetryAfterSeconds+rand.IntN(retryAfterSpreadSeconds))) //nolint:gosec // Jitter, not security.
 			writeProblemDocument(w, apiv1.Problem{
 				Status: http.StatusServiceUnavailable, Detail: "too many device requests at once", Code: apiv1.CodeOverloaded,
@@ -137,6 +138,14 @@ func (s *Server) handleDeviceReport(w http.ResponseWriter, r *http.Request, devi
 	if err != nil {
 		return err
 	}
+	outcome := result.IgnoredReason
+	switch {
+	case result.Duplicate:
+		outcome = "duplicate"
+	case result.Applied:
+		outcome = "applied"
+	}
+	s.metrics.Report(string(req.State), outcome)
 	writeJSON(w, http.StatusOK, apiv1.ReportResponse{
 		Applied:       result.Applied,
 		Duplicate:     result.Duplicate,
@@ -147,13 +156,14 @@ func (s *Server) handleDeviceReport(w http.ResponseWriter, r *http.Request, devi
 
 func deviceAssignmentDocument(a store.Assignment) apiv1.DeviceAssignment {
 	return apiv1.DeviceAssignment{
-		ID:         a.ID,
-		RolloutID:  a.RolloutID,
-		Generation: a.Generation,
-		Stage:      a.Stage,
-		State:      a.State,
-		Directive:  a.Directive,
-		Kind:       a.Kind,
-		Artifact:   artifactDocument(a.Artifact),
+		ID:             a.ID,
+		RolloutID:      a.RolloutID,
+		Generation:     a.Generation,
+		Stage:          a.Stage,
+		State:          a.State,
+		Directive:      a.Directive,
+		Kind:           a.Kind,
+		Artifact:       artifactDocument(a.Artifact),
+		RestoreRelease: a.RestoreRelease,
 	}
 }

@@ -204,26 +204,38 @@ func rolloutDocument(r store.Rollout) apiv1.Rollout {
 		haltDetail = *r.HaltDetail
 	}
 	return apiv1.Rollout{
-		HaltReason:   haltReason,
-		HaltDetail:   haltDetail,
-		Waiting:      r.Waiting,
-		ID:           r.ID,
-		FleetID:      r.FleetID,
-		Fleet:        r.FleetName,
-		ArtifactID:   r.ArtifactID,
-		Name:         r.Name,
-		State:        r.State,
-		Revision:     r.Revision,
-		Policy:       r.Policy,
-		PolicyDigest: hex.EncodeToString(r.PolicyDigest[:]),
-		CurrentStage: r.CurrentStage,
-		MemberCount:  r.MemberCount,
-		PausedFrom:   r.PausedFrom,
-		PausedAt:     r.PausedAt,
-		CreatedAt:    r.CreatedAt,
-		StartedAt:    r.StartedAt,
-		FinishedAt:   r.FinishedAt,
-		Stages:       stages,
-		Exclusions:   r.Exclusions,
+		HaltReason:     haltReason,
+		HaltDetail:     haltDetail,
+		Waiting:        r.Waiting,
+		ID:             r.ID,
+		FleetID:        r.FleetID,
+		Fleet:          r.FleetName,
+		ArtifactID:     r.ArtifactID,
+		Name:           r.Name,
+		State:          r.State,
+		Revision:       r.Revision,
+		Policy:         r.Policy,
+		PolicyDigest:   hex.EncodeToString(r.PolicyDigest[:]),
+		CurrentStage:   r.CurrentStage,
+		MemberCount:    r.MemberCount,
+		PausedFrom:     r.PausedFrom,
+		PausedAt:       r.PausedAt,
+		CreatedAt:      r.CreatedAt,
+		StartedAt:      r.StartedAt,
+		FinishedAt:     r.FinishedAt,
+		Stages:         stages,
+		Exclusions:     r.Exclusions,
+		Rollback:       rollbackDocument(r.Rollback),
+		FailureReasons: r.FailureReasons,
+	}
+}
+
+func rollbackDocument(p *store.RollbackProgress) *apiv1.RollbackProgress {
+	if p == nil {
+		return nil
+	}
+	return &apiv1.RollbackProgress{
+		Attempt: p.Attempt, DeadlineAt: p.DeadlineAt, Needed: p.Needed, Restored: p.Restored, Failed: p.Failed,
+		InFlight: p.InFlight, Unresolved: p.Unresolved, ForwardInFlight: p.ForwardInFlight,
 	}
 }

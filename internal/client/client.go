@@ -299,10 +299,11 @@ func (c *Client) GetRollout(ctx context.Context, id string) (apiv1.Rollout, erro
 
 // The rollout actions accepted by Transition.
 const (
-	ActionStart  = "start"
-	ActionPause  = "pause"
-	ActionResume = "resume"
-	ActionAbort  = "abort"
+	ActionStart    = "start"
+	ActionPause    = "pause"
+	ActionResume   = "resume"
+	ActionAbort    = "abort"
+	ActionRollback = "rollback"
 )
 
 // Transition applies an action such as ActionPause to a rollout.

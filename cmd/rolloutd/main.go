@@ -10,20 +10,24 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/Bispulm/fleet-rollout/internal/api"
 	"github.com/Bispulm/fleet-rollout/internal/artifactstore"
 	"github.com/Bispulm/fleet-rollout/internal/config"
 	"github.com/Bispulm/fleet-rollout/internal/db"
 	"github.com/Bispulm/fleet-rollout/internal/engine"
+	"github.com/Bispulm/fleet-rollout/internal/metrics"
 	"github.com/Bispulm/fleet-rollout/internal/signing"
 	"github.com/Bispulm/fleet-rollout/internal/store"
+	"github.com/Bispulm/fleet-rollout/internal/tracing"
 )
 
 const (
@@ -37,6 +41,8 @@ type env struct {
 	stdout      io.Writer
 	stderr      io.Writer
 	onListening func(net.Addr)
+	// onMetrics, if set, is told where metrics are served.
+	onMetrics func(net.Addr)
 }
 
 func main() {
@@ -105,7 +111,19 @@ func runServe(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger
 		return err
 	}
 
+	tracer, stopTracing, err := tracing.Setup(ctx, "rolloutd", e.getenv)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_ = stopTracing(ctx)
+	}()
+
 	st := store.New(pool)
+	m := metrics.New()
+	m.ObserveRollouts(st, logger)
 	server := api.New(api.Options{
 		Logger:             logger,
 		Ready:              func(ctx context.Context) error { return db.CheckReady(ctx, pool) },
@@ -117,7 +135,15 @@ func runServe(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger
 		MaxArtifactBytes:   cfg.MaxArtifactBytes,
 		MaxDeviceRequests:  cfg.MaxDeviceRequests,
 		MaxDeviceDownloads: cfg.MaxDeviceDownloads,
+		Metrics:            m,
+		Tracer:             tracer,
 	})
+
+	stopMetrics, err := serveMetrics(ctx, cfg.MetricsAddr, m, logger, e.onMetrics)
+	if err != nil {
+		return err
+	}
+	defer stopMetrics()
 
 	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", cfg.ListenAddr)
 	if err != nil {
@@ -128,7 +154,7 @@ func runServe(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger
 		e.onListening(listener.Addr())
 	}
 
-	stopEngine, err := startEngine(ctx, cfg, st, logger)
+	stopEngine, err := startEngine(ctx, cfg, st, logger, m, tracer)
 	if err != nil {
 		_ = listener.Close()
 		return err
@@ -145,7 +171,7 @@ func runServe(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger
 
 // startEngine runs the rollout engine in the background, and returns a function that
 // stops it and waits for it to give up its lease.
-func startEngine(ctx context.Context, cfg config.Config, st *store.Store, logger *slog.Logger) (func(), error) {
+func startEngine(ctx context.Context, cfg config.Config, st *store.Store, logger *slog.Logger, m *metrics.Metrics, tracer trace.TracerProvider) (func(), error) {
 	if !cfg.EngineEnabled {
 		logger.LogAttrs(ctx, slog.LevelInfo, "rollout engine disabled")
 		return func() {}, nil
@@ -162,6 +188,8 @@ func startEngine(ctx context.Context, cfg config.Config, st *store.Store, logger
 		Interval: cfg.EngineInterval,
 		LeaseTTL: cfg.EngineLeaseTTL,
 		Logger:   logger,
+		Metrics:  m,
+		Tracer:   tracer,
 	})
 	go func() {
 		defer close(done)
@@ -187,4 +215,29 @@ func engineHolder() (string, error) {
 		host = "unknown"
 	}
 	return host + "-" + hex.EncodeToString(suffix), nil
+}
+
+// serveMetrics serves Prometheus metrics on their own listener, until ctx ends or the returned
+// function is called. An empty address serves nothing.
+func serveMetrics(ctx context.Context, addr string, m *metrics.Metrics, logger *slog.Logger, onListening func(net.Addr)) (func(), error) {
+	if addr == "" {
+		return func() {}, nil
+	}
+	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("listen for metrics: %w", err)
+	}
+	logger.LogAttrs(ctx, slog.LevelInfo, "serving metrics", slog.String("addr", listener.Addr().String()))
+	if onListening != nil {
+		onListening(listener.Addr())
+	}
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", m.Handler())
+	server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.LogAttrs(ctx, slog.LevelError, "metrics server stopped", slog.Any("error", err))
+		}
+	}()
+	return func() { _ = server.Close() }, nil
 }

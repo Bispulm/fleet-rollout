@@ -161,3 +161,21 @@ func TestAnUnknownPresetIsRefused(t *testing.T) {
 		t.Fatal("an unknown preset was accepted")
 	}
 }
+
+func TestABadReleaseIsRolledBackWhenThePolicySaysTo(t *testing.T) {
+	t.Parallel()
+	sc := preset(t, "bad-release", 11, 200)
+	sc.Policy.Safety.OnBreach = rollout.OnBreachRollback
+	report := run(t, sc)
+
+	requireNoBadInstalls(t, report)
+	if report.State != rollout.StateRolledBack {
+		t.Fatalf("state = %s (%s: %s), rollback = %+v, want rolled back", report.State, report.HaltReason, report.HaltDetail, report.Rollback)
+	}
+	if report.Rollback == nil || report.Rollback.Needed == 0 || report.Rollback.Restored != report.Rollback.Needed {
+		t.Fatalf("rollback = %+v, want every updated device restored", report.Rollback)
+	}
+	if report.Updated != 0 {
+		t.Fatalf("%d devices still run the bad release", report.Updated)
+	}
+}

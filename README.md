@@ -8,8 +8,8 @@ bad release reaches everyone.
 assignments to devices that poll, takes their reports, advances stages, and halts a rollout that crosses a
 safety threshold. The device agent downloads signed artifacts in resumable chunks, asks before it installs,
 and reverts a release that fails its health check. A simulator runs fleets of the real agent with faults
-injected around it. On Kubernetes, an operator turns `Rollout` resources into rollouts. Rollback, metrics, and
-dashboards come next. See [what works](#what-works-today)
+injected around it. On Kubernetes, an operator turns `Rollout` resources into rollouts. A rollout that
+breaches can roll back, restoring what each device ran before. Metrics, traces, and a dashboard show it happen. See [what works](#what-works-today)
 and the [roadmap](#roadmap).
 
 All devices are simulated. This isn't meant to run on real hardware.
@@ -137,8 +137,28 @@ devices are never offered the release, and no device installs anything that isn'
 run is deterministic, so the same seed prints the same digest every time. `rollout-sim live --key
 release.key` runs the same presets in real time, over HTTP, against the `rolloutd` started above.
 
-A halted rollout can't be resumed. An operator aborts it, or will be able to roll it back once that
-exists, and a fresh rollout is the way forward.
+A halted rollout can't be resumed. An operator rolls it back, or aborts it, and a fresh rollout is the way forward.
+Rolling back tells each device that updated to restore the release it ran before, from its own previous slot, and
+`on_breach: rollback` does that as soon as the rollout halts. Here the same bad release has to show a failure rate
+over 20 outcomes before a stage counts it, so more devices update first, and all of them are restored:
+
+```bash
+./bin/rollout-sim run --preset bad-release --seed 7 --devices 500 --on-breach rollback --min-observations 20
+```
+
+```text
+deterministic run of preset bad-release (drop rate 0.05, bad release rate 0.3), seed 7, 500 devices
+rollout 50c4dfd0-1a00-4fd2-9d1d-5856003ee584 rolled_back after 2m30s (simulated time): stage_breach, stage 1: 4 failed of 22 outcomes, in a cohort of 50, above the 10.00% limit
+  stage 1  failed     50 devices: 18 succeeded, 4 failed, 6 superseded, 22 never assigned
+  stage 2  pending    75 devices: 0 succeeded, 0 failed, 0 superseded, 0 never assigned
+  stage 3  pending   125 devices: 0 succeeded, 0 failed, 0 superseded, 0 never assigned
+  stage 4  pending   250 devices: 0 succeeded, 0 failed, 0 superseded, 0 never assigned
+rolled back: 18 of 18 updated devices restored, 0 unresolved
+updated 0 of 500 devices; failures unhealthy 4; bad installs 0
+faults injected: corrupt 10, crash 4, drop 116, duplicate_report 9, lost_response 110, truncate 16; agent crashes 4
+downloaded 1665319 bytes in all, of a 65536-byte artifact
+digest eca9aa69763372554855ebe3a7f0468340ac46d0f86e939bf2b258acabe0e149
+```
 
 To clean up:
 
@@ -214,6 +234,28 @@ helm install fleet-rollout deploy/helm/fleet-rollout --namespace fleet-rollout -
   --set postgres.password="$(openssl rand -hex 16)"
 ```
 
+## Observability
+
+rolloutd serves Prometheus metrics on an address of its own, `127.0.0.1:18102` by default, and exports traces over
+OTLP when `OTEL_EXPORTER_OTLP_ENDPOINT` is set ([ADR 0012](docs/adr/0012-observability.md)). `make obs-up` runs
+rolloutd in Compose with Prometheus, Grafana, and Jaeger alongside, all on loopback. Stop the quick start's rolloutd
+first, since this one uses the same port:
+
+```bash
+./bin/rolloutctl key generate --private-key release.key --public-key release.pub
+export ROLLOUT_ADMIN_TOKEN="$(openssl rand -hex 24)"
+make obs-up
+
+./bin/rollout-sim live --preset bad-release --devices 100 --key release.key --on-breach rollback \
+  --min-observations 10 --quiet
+```
+
+The rollout halts and rolls back within seconds. The dashboard at http://127.0.0.1:18103 then shows the halt, its
+reason, each stage's outcomes, and the rollback restoring every device that updated. Prometheus is at
+http://127.0.0.1:18104, and Jaeger, with a trace for each request and engine decision, at http://127.0.0.1:18105.
+[docs/runbooks.md](docs/runbooks.md) says what to do about each thing the dashboard can show. `make dev-reset` stops
+it all and deletes its data.
+
 ## What works today
 
 | Area | Behavior |
@@ -228,10 +270,12 @@ helm install fleet-rollout deploy/helm/fleet-rollout --namespace fleet-rollout -
 | Reports | Bound to the authenticated device, rollout, generation, and sequence. Repeats change nothing, and delayed reports can't undo newer ones. A device's request to start installing is decided against the rollout, so nothing starts once a halt or pause has committed. |
 | Stage progression | Each stage is judged by its own cohort, with exact threshold arithmetic. Coverage, soak, and a separate limit on unknown devices all have to pass. Missing reports never count as success. |
 | Halting | Stops new exposure and cancels work that hasn't reached installation, in one transaction. The status shows why, and what's still in flight. |
+| Rollback | Each device that updated restores the release it ran before, from its previous slot, under a rollback assignment it asks permission to act on. By command or on breach. A rollback that misses its deadline is marked incomplete, and can be tried again. |
 | Engine | Any number of instances can run. A fenced lease in Postgres means one decides at a time, and a stale leader can't commit anything. All state survives a restart. |
 | Device agent | Polls with jitter, and downloads in verified chunks that survive a crash or a killed process. Checks the signature, platform, size, and release counter. Installs into the inactive slot only once the server agrees, and reverts if the health check fails or the install was interrupted. |
 | Kubernetes | `Fleet` and `Rollout` resources, an operator that turns them into API calls, and a Helm chart. Tested end to end on kind. |
 | Simulator | Runs fleets of the real agent with dropped and lost requests, corrupted and truncated downloads, crashes, offline devices, and reconnect storms. A seed reproduces a run exactly. |
+| Observability | Prometheus metrics for requests, shedding, reports, engine decisions, halts, and each rollout's progress. OpenTelemetry traces. A Grafana dashboard, and runbooks. |
 | Operations | Health and readiness endpoints, drain on shutdown, structured logs, and separate admin and device credentials. The server binds to loopback unless told otherwise. |
 
 [docs/rollout-semantics.md](docs/rollout-semantics.md) is the behavior contract, including what is
@@ -242,8 +286,7 @@ together, and [docs/adr](docs/adr) records the decisions.
 
 None of this exists yet.
 
-- **Safety and operations:** rollback, metrics, traces, and dashboards, plus scale testing of the paths
-  built so far.
+- **Scale:** load testing the paths built so far, at fleet sizes up to 10,000 devices.
 - **Release:** published benchmarks and a full bad-release demo.
 
 Real hardware, vehicle protocols, multi-region control planes, a web UI, delta updates, and a full

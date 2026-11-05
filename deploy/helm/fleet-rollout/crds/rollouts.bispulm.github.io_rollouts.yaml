@@ -284,6 +284,30 @@ spec:
                 description: Phase is the rollout's state in the control plane, such
                   as running, halted, or completed.
                 type: string
+              rollback:
+                description: Rollback is how far a rollback has got, once one has
+                  started.
+                properties:
+                  attempt:
+                    type: integer
+                  deadline:
+                    format: date-time
+                    type: string
+                  failed:
+                    type: integer
+                  needed:
+                    type: integer
+                  restored:
+                    type: integer
+                  unresolved:
+                    type: integer
+                required:
+                - attempt
+                - failed
+                - needed
+                - restored
+                - unresolved
+                type: object
               rolloutID:
                 description: RolloutID is the rollout's ID in the control plane, which
                   is this resource's UID.
