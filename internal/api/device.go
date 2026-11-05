@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"math/rand/v2"
 	"net/http"
 	"strconv"
 	"strings"
@@ -19,6 +20,13 @@ const (
 	maxDeviceBodyBytes     = 64 << 10
 	defaultPollInterval    = 60 * time.Second
 	defaultAssignmentLease = 5 * time.Minute
+	// defaultMaxDeviceRequests is comfortably more than the connection pool, so database
+	// connections are what actually queue, and only briefly.
+	defaultMaxDeviceRequests = 256
+	// Shed requests are told to come back after a random 1 to 5 seconds, so they don't all
+	// come back at the same moment.
+	minRetryAfterSeconds    = 1
+	retryAfterSpreadSeconds = 5
 )
 
 // deviceHandlerFunc handles a request from an authenticated device. Its identity comes
@@ -29,6 +37,19 @@ type deviceHandlerFunc func(http.ResponseWriter, *http.Request, store.Device) er
 // separate from admin authentication, and neither credential works on the other's routes.
 func (s *Server) device(next deviceHandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Taking a slot comes before anything that costs a database query, so that a
+		// reconnecting fleet can't queue more work than the server can take on.
+		select {
+		case s.deviceSlots <- struct{}{}:
+			defer func() { <-s.deviceSlots }()
+		default:
+			w.Header().Set("Retry-After", strconv.Itoa(minRetryAfterSeconds+rand.IntN(retryAfterSpreadSeconds))) //nolint:gosec // Jitter, not security.
+			writeProblemDocument(w, apiv1.Problem{
+				Status: http.StatusServiceUnavailable, Detail: "too many device requests at once", Code: apiv1.CodeOverloaded,
+			})
+			return
+		}
+
 		ctx, cancel := context.WithTimeout(r.Context(), deviceRequestTimeout)
 		defer cancel()
 		r = r.WithContext(ctx)

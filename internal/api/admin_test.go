@@ -30,11 +30,17 @@ type harness struct {
 
 func newHarness(t *testing.T) harness {
 	t.Helper()
-	return newHarnessWithLimit(t, 0)
+	return newHarnessWith(t, nil)
 }
 
-// newHarnessWithLimit uses the server's default artifact size limit if limit is zero.
+// newHarnessWithLimit sets the largest artifact the server accepts.
 func newHarnessWithLimit(t *testing.T, limit int64) harness {
+	t.Helper()
+	return newHarnessWith(t, func(o *api.Options) { o.MaxArtifactBytes = limit })
+}
+
+// newHarnessWith lets a test change the server's options.
+func newHarnessWith(t *testing.T, edit func(*api.Options)) harness {
 	t.Helper()
 	t.Parallel()
 	pool := testdb.New(t)
@@ -43,15 +49,18 @@ func newHarnessWithLimit(t *testing.T, limit int64) harness {
 	if err != nil {
 		t.Fatalf("NewFilesystem: %v", err)
 	}
-	srv := api.New(api.Options{
-		Logger:           slog.New(slog.DiscardHandler),
-		Ready:            alwaysReady,
-		Store:            store.New(pool),
-		AdminToken:       testAdminToken,
-		Trust:            signingtest.Trust(t, signer),
-		Artifacts:        artifacts,
-		MaxArtifactBytes: limit,
-	})
+	opts := api.Options{
+		Logger:     slog.New(slog.DiscardHandler),
+		Ready:      alwaysReady,
+		Store:      store.New(pool),
+		AdminToken: testAdminToken,
+		Trust:      signingtest.Trust(t, signer),
+		Artifacts:  artifacts,
+	}
+	if edit != nil {
+		edit(&opts)
+	}
+	srv := api.New(opts)
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 	return harness{t: t, base: ts.URL, signer: signer}

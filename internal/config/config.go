@@ -12,15 +12,16 @@ import (
 )
 
 const (
-	defaultListenAddr       = "127.0.0.1:18100"
-	defaultShutdownTimeout  = 15 * time.Second
-	defaultDBMaxConns       = 16
-	minAdminTokenLength     = 16
-	defaultEngineInterval   = 5 * time.Second
-	defaultEngineLeaseTTL   = 30 * time.Second
-	defaultPollInterval     = time.Minute
-	defaultAssignmentLease  = 5 * time.Minute
-	defaultMaxArtifactBytes = 1 << 30
+	defaultListenAddr        = "127.0.0.1:18100"
+	defaultShutdownTimeout   = 15 * time.Second
+	defaultDBMaxConns        = 16
+	minAdminTokenLength      = 16
+	defaultEngineInterval    = 5 * time.Second
+	defaultEngineLeaseTTL    = 30 * time.Second
+	defaultPollInterval      = time.Minute
+	defaultAssignmentLease   = 5 * time.Minute
+	defaultMaxArtifactBytes  = 1 << 30
+	defaultMaxDeviceRequests = 256
 	// A slow tick or two shouldn't cost the engine its lease.
 	minLeaseTTLIntervals = 3
 	// A device that misses one poll shouldn't lose its assignment's lease.
@@ -37,9 +38,10 @@ type Config struct {
 	DBMaxConns      int32
 
 	// TrustKeysFile lists the public keys allowed to sign artifacts.
-	TrustKeysFile    string
-	ArtifactDir      string
-	MaxArtifactBytes int64
+	TrustKeysFile     string
+	ArtifactDir       string
+	MaxArtifactBytes  int64
+	MaxDeviceRequests int
 
 	EngineEnabled   bool
 	EngineInterval  time.Duration
@@ -127,6 +129,16 @@ func Load(getenv func(string) string) (Config, error) {
 			problems = append(problems, fmt.Errorf("ROLLOUTD_MAX_ARTIFACT_BYTES: %q is not a positive integer", v))
 		} else {
 			cfg.MaxArtifactBytes = n
+		}
+	}
+
+	cfg.MaxDeviceRequests = defaultMaxDeviceRequests
+	if v := getenv("ROLLOUTD_MAX_DEVICE_REQUESTS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			problems = append(problems, fmt.Errorf("ROLLOUTD_MAX_DEVICE_REQUESTS: %q is not a positive integer", v))
+		} else {
+			cfg.MaxDeviceRequests = n
 		}
 	}
 

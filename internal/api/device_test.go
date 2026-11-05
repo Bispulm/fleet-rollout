@@ -1,10 +1,16 @@
 package api_test
 
 import (
+	"fmt"
+	"io"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/Bispulm/fleet-rollout/internal/api"
 	"github.com/Bispulm/fleet-rollout/internal/apiv1"
 	"github.com/Bispulm/fleet-rollout/internal/rollout"
 )
@@ -276,4 +282,75 @@ func TestStatusCountsDevicesInFlight(t *testing.T) {
 	if r.Stages[0].InFlight != 1 {
 		t.Fatalf("in flight = %d", r.Stages[0].InFlight)
 	}
+}
+
+// A fleet reconnecting all at once must be turned away quickly, rather than queuing without a
+// limit. Device requests share a bounded number of slots, and the rest get told when to retry.
+func TestDeviceRequestsBeyondTheLimitAreShedWithRetryAfter(t *testing.T) {
+	h := newHarnessWith(t, func(o *api.Options) { o.MaxDeviceRequests = 1 })
+	h.createFleet("lab-a")
+	devices := h.registerDevices("lab-a", 2)
+
+	// One device holds the only slot, with a request whose body never finishes arriving. It's
+	// written by hand, because an HTTP client buffers a streamed request and wouldn't send it.
+	conn, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", strings.TrimPrefix(h.base, "http://"))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	// This runs before the server's own cleanup, so a failure here can't leave the server
+	// waiting forever on the held request.
+	t.Cleanup(func() { _ = conn.Close() })
+	if _, err := fmt.Fprintf(conn, "POST /v1/device/reports HTTP/1.1\r\nHost: test\r\nAuthorization: Bearer %s\r\n"+
+		"Content-Type: application/json\r\nContent-Length: 1000\r\n\r\n{\"sequence\":", devices[0].Token); err != nil {
+		t.Fatalf("write held request: %v", err)
+	}
+	// A broken limiter would make a poll wait for the slot, so a timeout turns that into a failure.
+	poller := &http.Client{Timeout: 2 * time.Second}
+
+	var shed http.Header
+	deadline := time.Now().Add(5 * time.Second)
+	for shed == nil && time.Now().Before(deadline) {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, h.base+"/v1/device/poll", http.NoBody)
+		if err != nil {
+			t.Fatalf("build request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+devices[1].Token)
+		resp, err := poller.Do(req)
+		if err != nil {
+			t.Fatalf("poll: %v", err)
+		}
+		raw, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode == http.StatusServiceUnavailable {
+			if !strings.Contains(string(raw), apiv1.CodeOverloaded) {
+				t.Fatalf("body = %s", raw)
+			}
+			shed = resp.Header
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if shed == nil {
+		t.Fatal("the second device was never turned away")
+	}
+	seconds, err := strconv.Atoi(shed.Get("Retry-After"))
+	if err != nil || seconds < 1 || seconds > 30 {
+		t.Fatalf("Retry-After = %q", shed.Get("Retry-After"))
+	}
+
+	// Once the slot is free, the other device gets through.
+	_ = conn.Close()
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		status, _ := h.doWithAuth("Bearer "+devices[1].Token, http.MethodPost, "/v1/device/poll", nil)
+		if status == http.StatusOK {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after the slot freed up: status = %d", status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Admin requests don't compete with devices for slots.
+	h.expect(http.StatusOK, http.MethodGet, "/v1/fleets/lab-a", nil, nil)
 }

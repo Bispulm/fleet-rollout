@@ -261,3 +261,6 @@ const (
 	CodeContentMismatch  = "content_mismatch"
 	CodeNoOpenAssignment = "no_open_assignment"
 )
+
+// CodeOverloaded means the server is shedding load. Retry after the time in Retry-After.
+const CodeOverloaded = "overloaded"
