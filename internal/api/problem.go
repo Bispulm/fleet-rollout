@@ -40,6 +40,7 @@ type requestError struct {
 	status     int
 	detail     string
 	violations []rollout.Violation
+	cause      error
 }
 
 func (e *requestError) Error() string { return e.detail }

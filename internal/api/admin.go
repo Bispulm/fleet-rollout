@@ -53,6 +53,14 @@ func (s *Server) registerAdminRoutes() {
 	s.mux.Handle("PATCH /v1/devices/{id}", s.admin(s.handleUpdateDevice))
 	s.mux.Handle("POST /v1/artifacts", s.admin(s.handleCreateArtifact))
 	s.mux.Handle("GET /v1/artifacts/{id}", s.admin(s.handleGetArtifact))
+	s.mux.Handle("POST /v1/fleets/{fleet}/rollouts", s.admin(s.handleCreateRollout))
+	s.mux.Handle("GET /v1/rollouts/{id}", s.admin(s.handleGetRollout))
+	s.mux.Handle("GET /v1/rollouts/{id}/cohort", s.admin(s.handleListCohort))
+	s.mux.Handle("GET /v1/rollouts/{id}/transitions", s.admin(s.handleListTransitions))
+	s.mux.Handle("POST /v1/rollouts/{id}/start", s.admin(s.handleTransition(s.store.StartRollout)))
+	s.mux.Handle("POST /v1/rollouts/{id}/pause", s.admin(s.handleTransition(s.store.PauseRollout)))
+	s.mux.Handle("POST /v1/rollouts/{id}/resume", s.admin(s.handleTransition(s.store.ResumeRollout)))
+	s.mux.Handle("POST /v1/rollouts/{id}/abort", s.admin(s.handleTransition(s.store.AbortRollout)))
 }
 
 // decodeJSON reads exactly one JSON document, rejecting unknown fields so that a
@@ -65,7 +73,7 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 		if errors.As(err, &tooLarge) {
 			return &requestError{status: http.StatusRequestEntityTooLarge, detail: "the request body is too large"}
 		}
-		return badRequest("the request body is not valid: " + err.Error())
+		return &requestError{status: http.StatusBadRequest, detail: "the request body is not valid: " + err.Error(), cause: err}
 	}
 	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
 		return badRequest("the request body must contain a single JSON document")
