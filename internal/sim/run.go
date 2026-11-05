@@ -488,6 +488,10 @@ func RunLive(ctx context.Context, cfg LiveConfig) (Report, error) {
 			return Report{}, ctx.Err()
 		case <-ticker.C:
 		}
+		if time.Now().After(deadline) {
+			report.TimedOut = true
+			break
+		}
 		status, err = admin.GetRollout(ctx, setup.rolloutID)
 		if err != nil {
 			continue // The server may be shedding load. Its devices keep running.
@@ -501,10 +505,6 @@ func RunLive(ctx context.Context, cfg LiveConfig) (Report, error) {
 			allQuiet = allQuiet && quiet[i].Load()
 		}
 		if finished(status.State) && allQuiet {
-			break
-		}
-		if time.Now().After(deadline) {
-			report.TimedOut = true
 			break
 		}
 	}

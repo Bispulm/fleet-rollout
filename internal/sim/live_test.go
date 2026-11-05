@@ -2,9 +2,12 @@ package sim_test
 
 import (
 	"context"
+	"crypto/ed25519"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,23 +23,29 @@ import (
 
 const liveAdminToken = "live-simulation-admin-token-0123456789"
 
-func TestALiveRunOverRealHTTPCompletesAndCleansUp(t *testing.T) {
+// liveServer runs a control plane over real HTTP, with its engine, until the test ends. wrap,
+// if set, sits in front of the API.
+func liveServer(t *testing.T, wrap func(http.Handler) http.Handler) (url string, signer ed25519.PrivateKey) {
+	t.Helper()
 	pool := testdb.New(t)
-	signer := signingtest.NewKey(t)
-	trust := signingtest.Trust(t, signer)
+	signer = signingtest.NewKey(t)
 	logger := slog.New(slog.DiscardHandler)
 	st := store.New(pool)
-	server := httptest.NewServer(api.New(api.Options{
+	var handler http.Handler = api.New(api.Options{
 		Logger:            logger,
 		Ready:             func(context.Context) error { return nil },
 		Store:             st,
 		AdminToken:        liveAdminToken,
 		PollInterval:      time.Second,
-		Trust:             trust,
+		Trust:             signingtest.Trust(t, signer),
 		Artifacts:         artifactstore.NewMemory(),
 		MaxArtifactBytes:  1 << 20,
 		MaxDeviceRequests: 256,
-	}))
+	})
+	if wrap != nil {
+		handler = wrap(handler)
+	}
+	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 	engineCtx, stopEngine := context.WithCancel(t.Context())
 	engineDone := make(chan struct{})
@@ -50,6 +59,12 @@ func TestALiveRunOverRealHTTPCompletesAndCleansUp(t *testing.T) {
 		}
 	}()
 	t.Cleanup(func() { stopEngine(); <-engineDone })
+	return server.URL, signer
+}
+
+func TestALiveRunOverRealHTTPCompletesAndCleansUp(t *testing.T) {
+	url, signer := liveServer(t, nil)
+	trust := signingtest.Trust(t, signer)
 
 	// Let the server's own goroutines settle before counting.
 	time.Sleep(100 * time.Millisecond)
@@ -65,7 +80,7 @@ func TestALiveRunOverRealHTTPCompletesAndCleansUp(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
 	report, err := sim.RunLive(ctx, sim.LiveConfig{
-		Scenario: sc, APIURL: server.URL, AdminToken: liveAdminToken, Signer: signer, Trust: trust,
+		Scenario: sc, APIURL: url, AdminToken: liveAdminToken, Signer: signer, Trust: trust,
 	})
 	if err != nil {
 		t.Fatalf("RunLive: %v", err)
@@ -86,5 +101,36 @@ func TestALiveRunOverRealHTTPCompletesAndCleansUp(t *testing.T) {
 	}
 	if after := runtime.NumGoroutine(); after > before+4 {
 		t.Fatalf("%d goroutines before the run, %d after", before, after)
+	}
+}
+
+func TestALiveRunStopsAtItsDeadlineWhenStatusIsUnavailable(t *testing.T) {
+	// Everything works except reading the rollout's status, which is what the run watches.
+	url, signer := liveServer(t, func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/rollouts/") {
+				http.Error(w, "unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+	sc, err := sim.Preset("clean", 6, 5, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc.Fleet = "blind"
+	sc.MaxDuration = 2 * time.Second
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	started := time.Now()
+	report, err := sim.RunLive(ctx, sim.LiveConfig{
+		Scenario: sc, APIURL: url, AdminToken: liveAdminToken, Signer: signer, Trust: signingtest.Trust(t, signer),
+	})
+	if err != nil {
+		t.Fatalf("RunLive: %v, after %s", err, time.Since(started))
+	}
+	if !report.TimedOut {
+		t.Fatalf("report = %+v, want it to have given up", report)
 	}
 }
