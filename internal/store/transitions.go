@@ -266,10 +266,14 @@ func (s *Store) ResumeRollout(ctx context.Context, id string, opts TransitionOpt
 	})
 }
 
-// AbortRollout finishes a rollout without rolling it back. Devices keep whatever
-// they have installed, and the fleet is free for another rollout.
+// AbortRollout finishes a rollout without rolling it back. Assignments that haven't
+// reached installation are superseded. Devices keep whatever they have installed, and
+// the fleet is free for another rollout.
 func (s *Store) AbortRollout(ctx context.Context, id string, opts TransitionOptions) (Rollout, error) {
 	return s.transition(ctx, id, rollout.EventAbort, opts, func(tx pgx.Tx, _ lockedRollout, to rollout.State, now time.Time) error {
+		if err := supersedeUnstarted(ctx, tx, id, now); err != nil {
+			return err
+		}
 		_, err := tx.Exec(ctx, `
 			UPDATE rollouts SET state = $2, revision = revision + 1, paused_from = NULL, paused_at = NULL, finished_at = $3
 			WHERE id = $1`, id, to, now)

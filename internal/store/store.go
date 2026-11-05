@@ -48,6 +48,11 @@ func New(pool *pgxpool.Pool, opts ...Option) *Store {
 	return s
 }
 
+// querier is what read helpers need, so they can run in or out of a transaction.
+type querier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
 // inTx runs fn in a transaction, committing only if it returns nil.
 func (s *Store) inTx(ctx context.Context, fn func(pgx.Tx) error) error {
 	return pgx.BeginFunc(ctx, s.pool, fn)
