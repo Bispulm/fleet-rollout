@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/Bispulm/fleet-rollout/internal/rollout"
 	"github.com/Bispulm/fleet-rollout/internal/store"
+	"github.com/Bispulm/fleet-rollout/internal/testdb"
 )
 
 func ptr[T any](v T) *T { return &v }
@@ -200,5 +203,147 @@ func TestGetRolloutReportsNotFound(t *testing.T) {
 		if _, err := s.GetRollout(ctx, id); !errors.Is(err, store.ErrNotFound) {
 			t.Errorf("GetRollout(%q) error = %v, want ErrNotFound", id, err)
 		}
+	}
+}
+
+// A client that times out and retries can have its retry race the first attempt,
+// which may still be in flight. The retry must find that rollout, not a conflict.
+func TestRetryRacingAnInFlightCreateReturnsTheRollout(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool := testdb.New(t)
+	s := store.New(pool)
+	w := newWorld(t, ctx, s, 10)
+	input := w.newRollout(t, "demo")
+	encoded, digest, err := input.Policy.Canonical()
+	if err != nil {
+		t.Fatalf("Canonical: %v", err)
+	}
+
+	// The first attempt: inserted, but not committed yet.
+	first, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	defer func() { _ = first.Rollback(ctx) }()
+	var firstID string
+	if err := first.QueryRow(ctx, `
+		INSERT INTO rollouts (fleet_id, artifact_id, name, policy, policy_digest, created_at)
+		SELECT id, $1, 'demo', $2, $3, now() FROM fleets WHERE name = 'lab-a' RETURNING id`,
+		w.artifact.ID, encoded, digest[:]).Scan(&firstID); err != nil {
+		t.Fatalf("insert first attempt: %v", err)
+	}
+	for i, stage := range input.Policy.Stages {
+		if _, err := first.Exec(ctx, `INSERT INTO rollout_stages (rollout_id, ordinal, percent) VALUES ($1, $2, $3)`,
+			firstID, i+1, stage.Percent); err != nil {
+			t.Fatalf("insert stage: %v", err)
+		}
+	}
+
+	type result struct {
+		rollout store.Rollout
+		created bool
+		err     error
+	}
+	retry := make(chan result, 1)
+	go func() {
+		r, created, err := s.CreateRollout(ctx, "lab-a", input)
+		retry <- result{r, created, err}
+	}()
+
+	// Wait until the retry is really blocked on the first attempt's unique key.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var waiting int
+		err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity
+			WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&waiting)
+		if err != nil {
+			t.Fatalf("check blocked sessions: %v", err)
+		}
+		if waiting > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the retry never blocked on the first attempt")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := first.Commit(ctx); err != nil {
+		t.Fatalf("commit first attempt: %v", err)
+	}
+
+	got := <-retry
+	if got.err != nil {
+		t.Fatalf("retry failed: %v", got.err)
+	}
+	if got.created || got.rollout.ID != firstID {
+		t.Fatalf("retry returned created = %v, id = %s; want the first attempt's %s", got.created, got.rollout.ID, firstID)
+	}
+}
+
+func TestConcurrentIdenticalCreatesReturnOneRollout(t *testing.T) {
+	s, ctx := newStore(t)
+	w := newWorld(t, ctx, s, 10)
+
+	const attempts = 8
+	ids := make([]string, attempts)
+	created := make([]bool, attempts)
+	errs := make([]error, attempts)
+	var wg sync.WaitGroup
+	for i := range attempts {
+		wg.Go(func() {
+			var r store.Rollout
+			r, created[i], errs[i] = s.CreateRollout(ctx, "lab-a", w.newRollout(t, "demo"))
+			ids[i] = r.ID
+		})
+	}
+	wg.Wait()
+
+	newCount := 0
+	for i := range attempts {
+		if errs[i] != nil {
+			t.Errorf("attempt %d: %v", i, errs[i])
+			continue
+		}
+		if ids[i] != ids[0] {
+			t.Errorf("attempt %d returned %s, want %s", i, ids[i], ids[0])
+		}
+		if created[i] {
+			newCount++
+		}
+	}
+	if newCount != 1 {
+		t.Fatalf("%d attempts reported creating the rollout, want 1", newCount)
+	}
+}
+
+func TestDifferentDefinitionRacingACreateStillConflicts(t *testing.T) {
+	s, ctx := newStore(t)
+	w := newWorld(t, ctx, s, 100)
+
+	limits := []int{100, 200}
+	errs := make([]error, len(limits))
+	var wg sync.WaitGroup
+	for i, limit := range limits {
+		input := w.newRollout(t, "demo")
+		input.Policy = mustPolicy(t, func(p *rollout.PolicySpec) { p.Safety.MaxFailureBPS = ptr(limit) })
+		wg.Go(func() { _, _, errs[i] = s.CreateRollout(ctx, "lab-a", input) })
+	}
+	wg.Wait()
+
+	conflicts := 0
+	for _, err := range errs {
+		var conflict *store.ConflictError
+		switch {
+		case err == nil:
+		case errors.As(err, &conflict):
+			conflicts++
+		default:
+			t.Errorf("unexpected error: %v", err)
+		}
+	}
+	if conflicts != 1 {
+		t.Fatalf("errors = %v, want exactly one conflict", errs)
 	}
 }

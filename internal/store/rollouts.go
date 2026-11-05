@@ -78,7 +78,7 @@ type Rollout struct {
 // Creation is idempotent, so a client can retry safely: repeating a request with
 // the same name, artifact, and policy returns the existing rollout with created
 // set to false. The same name with anything different is a *ConflictError.
-func (s *Store) CreateRollout(ctx context.Context, fleetName string, n NewRollout) (out Rollout, created bool, err error) {
+func (s *Store) CreateRollout(ctx context.Context, fleetName string, n NewRollout) (Rollout, bool, error) {
 	if n.ID != "" && !rollout.ValidUUID(n.ID) {
 		return Rollout{}, false, &rollout.PolicyError{Violations: []rollout.Violation{
 			{Field: "id", Message: fmt.Sprintf("%q is not a canonical lowercase UUID", n.ID)},
@@ -92,7 +92,34 @@ func (s *Store) CreateRollout(ctx context.Context, fleetName string, n NewRollou
 		return Rollout{}, false, err
 	}
 
-	var id string
+	// An insert that loses a race on a unique key aborts its transaction, so it
+	// can't look for the winner. Running again from the start does, and the lookup
+	// then tells an identical retry from a genuine conflict.
+	id, created, err := s.createRolloutOnce(ctx, fleetName, n, encoded, digest)
+	if isUniqueViolation(err, "") {
+		id, created, err = s.createRolloutOnce(ctx, fleetName, n, encoded, digest)
+	}
+	switch {
+	case isUniqueViolation(err, "rollouts_pkey"):
+		return Rollout{}, false, &ConflictError{Message: fmt.Sprintf("rollout ID %s is already in use", n.ID)}
+	case isUniqueViolation(err, ""):
+		return Rollout{}, false, &ConflictError{Message: fmt.Sprintf("rollout %q is being created concurrently; try again", n.Name)}
+	case err != nil:
+		return Rollout{}, false, err
+	}
+
+	out, err := s.GetRollout(ctx, id)
+	if err != nil {
+		return Rollout{}, false, err
+	}
+	return out, created, nil
+}
+
+// createRolloutOnce makes one attempt in one transaction. A lost race on a unique
+// key is returned as the Postgres error, for CreateRollout to handle.
+func (s *Store) createRolloutOnce(
+	ctx context.Context, fleetName string, n NewRollout, encoded []byte, digest [sha256.Size]byte,
+) (id string, created bool, err error) {
 	err = s.inTx(ctx, func(tx pgx.Tx) error {
 		var fleetID string
 		err := tx.QueryRow(ctx, `SELECT id FROM fleets WHERE name = $1`, fleetName).Scan(&fleetID)
@@ -145,14 +172,7 @@ func (s *Store) CreateRollout(ctx context.Context, fleetName string, n NewRollou
 			VALUES (COALESCE(NULLIF($1, '')::uuid, gen_random_uuid()), $2, $3, $4, $5, $6, $7)
 			RETURNING id`,
 			n.ID, fleetID, n.ArtifactID, n.Name, encoded, digest[:], s.now()).Scan(&id)
-		switch {
-		case isUniqueViolation(err, "rollouts_pkey"):
-			return &ConflictError{Message: fmt.Sprintf("rollout ID %s is already in use", n.ID)}
-		case isUniqueViolation(err, ""):
-			// A concurrent request won the race for this name. Its definition may
-			// differ, so the client has to look.
-			return &ConflictError{Message: fmt.Sprintf("rollout %q was created concurrently", n.Name)}
-		case err != nil:
+		if err != nil {
 			return fmt.Errorf("insert rollout: %w", err)
 		}
 		created = true
@@ -166,13 +186,9 @@ func (s *Store) CreateRollout(ctx context.Context, fleetName string, n NewRollou
 		return nil
 	})
 	if err != nil {
-		return Rollout{}, false, err
+		return "", false, err
 	}
-	out, err = s.GetRollout(ctx, id)
-	if err != nil {
-		return Rollout{}, false, err
-	}
-	return out, created, nil
+	return id, created, nil
 }
 
 // GetRollout returns a rollout's status from one consistent snapshot, so a
