@@ -276,3 +276,35 @@ func TestConcurrentStartRequestsHaveOneWinner(t *testing.T) {
 		t.Fatalf("%d requests started the rollout: %v", wins, statuses)
 	}
 }
+
+// Values like these used to reach Postgres, which rejected them with an error the
+// API could only report as a 500.
+func TestInputPostgresWouldRejectFailsCleanly(t *testing.T) {
+	h := newHarness(t)
+	r := h.newRollout(10)
+	cases := []struct {
+		name   string
+		status int
+		method string
+		path   string
+		body   any
+	}{
+		{"stage beyond int4", http.StatusBadRequest, http.MethodGet, "/v1/rollouts/" + r.ID + "/cohort?stage=3000000000", nil},
+		{"after beyond int4", http.StatusBadRequest, http.MethodGet, "/v1/rollouts/" + r.ID + "/cohort?after=3000000000", nil},
+		{"NUL in reason", http.StatusUnprocessableEntity, http.MethodPost, "/v1/rollouts/" + r.ID + "/start", `{"reason":"a\u0000b"}`},
+		{"NUL in fleet path", http.StatusNotFound, http.MethodGet, "/v1/fleets/a%00b", nil},
+		{"NUL in fleet path for devices", http.StatusNotFound, http.MethodGet, "/v1/fleets/a%00b/devices", nil},
+		{"NUL in fleet path for registering", http.StatusNotFound, http.MethodPost, "/v1/fleets/a%00b/devices",
+			apiv1.RegisterDevicesRequest{Devices: deviceSpecs(1)}},
+		{"NUL in fleet path for a rollout", http.StatusNotFound, http.MethodPost, "/v1/fleets/a%00b/rollouts", rolloutRequest(r.ArtifactID)},
+		{"NUL in device path", http.StatusNotFound, http.MethodPatch, "/v1/devices/a%00b", `{"status":"active"}`},
+		{"NUL in after", http.StatusBadRequest, http.MethodGet, "/v1/fleets/lab-a/devices?after=%00", nil},
+		{"NUL in rollout path", http.StatusNotFound, http.MethodGet, "/v1/rollouts/a%00b", nil},
+		{"NUL in artifact path", http.StatusNotFound, http.MethodGet, "/v1/artifacts/a%00b", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h.on(t).problem(tc.status, tc.method, tc.path, tc.body)
+		})
+	}
+}

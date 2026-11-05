@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -93,6 +94,16 @@ func pageLimit(r *http.Request) (int, error) {
 	return limit, nil
 }
 
+// fleetParam returns the fleet named in the path. A name that could never exist
+// is simply not found, which also keeps bytes Postgres rejects out of queries.
+func fleetParam(r *http.Request) (string, error) {
+	name := r.PathValue("fleet")
+	if !rollout.ValidName(name) {
+		return "", fmt.Errorf("fleet %q: %w", name, store.ErrNotFound)
+	}
+	return name, nil
+}
+
 func (s *Server) handleCreateFleet(w http.ResponseWriter, r *http.Request) error {
 	var req apiv1.CreateFleetRequest
 	if err := decodeJSON(w, r, &req); err != nil {
@@ -113,7 +124,11 @@ func (s *Server) handleCreateFleet(w http.ResponseWriter, r *http.Request) error
 }
 
 func (s *Server) handleGetFleet(w http.ResponseWriter, r *http.Request) error {
-	fleet, err := s.store.GetFleet(r.Context(), r.PathValue("fleet"))
+	name, err := fleetParam(r)
+	if err != nil {
+		return err
+	}
+	fleet, err := s.store.GetFleet(r.Context(), name)
 	if err != nil {
 		return err
 	}
@@ -122,6 +137,10 @@ func (s *Server) handleGetFleet(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (s *Server) handleRegisterDevices(w http.ResponseWriter, r *http.Request) error {
+	fleet, err := fleetParam(r)
+	if err != nil {
+		return err
+	}
 	var req apiv1.RegisterDevicesRequest
 	if err := decodeJSON(w, r, &req); err != nil {
 		return err
@@ -161,7 +180,7 @@ func (s *Server) handleRegisterDevices(w http.ResponseWriter, r *http.Request) e
 		}
 	}
 
-	registered, err := s.store.RegisterDevices(r.Context(), r.PathValue("fleet"), devices)
+	registered, err := s.store.RegisterDevices(r.Context(), fleet, devices)
 	if err != nil {
 		return err
 	}
@@ -175,11 +194,19 @@ func (s *Server) handleRegisterDevices(w http.ResponseWriter, r *http.Request) e
 }
 
 func (s *Server) handleListDevices(w http.ResponseWriter, r *http.Request) error {
+	fleet, err := fleetParam(r)
+	if err != nil {
+		return err
+	}
 	limit, err := pageLimit(r)
 	if err != nil {
 		return err
 	}
-	devices, err := s.store.ListDevices(r.Context(), r.PathValue("fleet"), r.URL.Query().Get("after"), limit)
+	after := r.URL.Query().Get("after")
+	if after != "" && !rollout.ValidDeviceID(after) {
+		return badRequest("after must be a device ID")
+	}
+	devices, err := s.store.ListDevices(r.Context(), fleet, after, limit)
 	if err != nil {
 		return err
 	}
@@ -204,7 +231,11 @@ func (s *Server) handleUpdateDevice(w http.ResponseWriter, r *http.Request) erro
 	default:
 		return invalid("status", "must be active, excluded, or decommissioned")
 	}
-	device, err := s.store.SetDeviceStatus(r.Context(), r.PathValue("id"), req.Status)
+	id := r.PathValue("id")
+	if !rollout.ValidDeviceID(id) {
+		return fmt.Errorf("device %q: %w", id, store.ErrNotFound)
+	}
+	device, err := s.store.SetDeviceStatus(r.Context(), id, req.Status)
 	if err != nil {
 		return err
 	}

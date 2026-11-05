@@ -5,8 +5,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/Bispulm/fleet-rollout/internal/apiv1"
 	"github.com/Bispulm/fleet-rollout/internal/rollout"
@@ -21,6 +23,10 @@ const (
 )
 
 func (s *Server) handleCreateRollout(w http.ResponseWriter, r *http.Request) error {
+	fleet, err := fleetParam(r)
+	if err != nil {
+		return err
+	}
 	var req apiv1.CreateRolloutRequest
 	if err := decodeJSON(w, r, &req); err != nil {
 		return err
@@ -32,7 +38,7 @@ func (s *Server) handleCreateRollout(w http.ResponseWriter, r *http.Request) err
 	if err != nil {
 		return err
 	}
-	created, isNew, err := s.store.CreateRollout(r.Context(), r.PathValue("fleet"), store.NewRollout{
+	created, isNew, err := s.store.CreateRollout(r.Context(), fleet, store.NewRollout{
 		ID:         req.ID,
 		Name:       req.Name,
 		ArtifactID: req.ArtifactID,
@@ -71,6 +77,9 @@ func (s *Server) handleTransition(apply transitionFunc) handlerFunc {
 		}
 		if len(req.Reason) > maxReasonLength {
 			return invalid("reason", "must be at most "+strconv.Itoa(maxReasonLength)+" bytes")
+		}
+		if strings.ContainsRune(req.Reason, 0) {
+			return invalid("reason", "must not contain NUL characters")
 		}
 		updated, err := apply(r.Context(), r.PathValue("id"), store.TransitionOptions{
 			Actor:            adminActor,
@@ -157,8 +166,8 @@ func nonNegativeQuery(r *http.Request, name string) (int, error) {
 		return 0, nil
 	}
 	value, err := strconv.Atoi(raw)
-	if err != nil || value < 0 {
-		return 0, badRequest(name + " must be a non-negative integer")
+	if err != nil || value < 0 || value > math.MaxInt32 {
+		return 0, badRequest(name + " must be a non-negative 32-bit integer")
 	}
 	return value, nil
 }

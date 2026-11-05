@@ -39,6 +39,14 @@ func newHarness(t *testing.T) harness {
 	return harness{t: t, base: ts.URL}
 }
 
+// on returns a harness that reports failures to t. Subtests must use it, because
+// Fatalf has to be called on the test running in the current goroutine.
+func (h harness) on(t *testing.T) harness {
+	t.Helper()
+	h.t = t
+	return h
+}
+
 // do sends a request with the admin token and returns the status and raw body.
 func (h harness) do(method, path string, body any) (int, []byte) {
 	h.t.Helper()
@@ -133,7 +141,7 @@ func TestAdminRoutesRequireTheAdminToken(t *testing.T) {
 		"scheme":  "Basic " + testAdminToken,
 	} {
 		t.Run(name, func(t *testing.T) {
-			status, raw := h.doWithAuth(authorization, http.MethodGet, "/v1/fleets/lab-a", nil)
+			status, raw := h.on(t).doWithAuth(authorization, http.MethodGet, "/v1/fleets/lab-a", nil)
 			if status != http.StatusUnauthorized {
 				t.Fatalf("status = %d, body: %s", status, raw)
 			}
@@ -206,7 +214,7 @@ func TestRequestValidation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h.problem(tc.status, http.MethodPost, tc.path, tc.body)
+			h.on(t).problem(tc.status, http.MethodPost, tc.path, tc.body)
 		})
 	}
 }

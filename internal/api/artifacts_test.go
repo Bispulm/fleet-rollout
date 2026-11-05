@@ -59,7 +59,7 @@ func TestArtifactValidation(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			req := artifactRequest("1.4.0", 14)
 			edit(&req)
-			h.problem(http.StatusUnprocessableEntity, http.MethodPost, "/v1/artifacts", req)
+			h.on(t).problem(http.StatusUnprocessableEntity, http.MethodPost, "/v1/artifacts", req)
 		})
 	}
 }
