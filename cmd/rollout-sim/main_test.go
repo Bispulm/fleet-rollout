@@ -24,6 +24,7 @@ func TestArgumentsAreChecked(t *testing.T) {
 		"drop rate over 1": {"run", "--drop-rate", "1.5", "--database-url", "postgres://x"},
 		"bad rate over 1":  {"run", "--bad-release-rate", "2", "--database-url", "postgres://x"},
 		"bad breach":       {"run", "--on-breach", "panic", "--database-url", "postgres://x"},
+		"negative minimum": {"run", "--min-observations", "-1", "--database-url", "postgres://x"},
 		"no admin token":   {"live", "--key", "release.key"},
 		"fleet, no tokens": {"fleet", "--trust-keys", "release.pub"},
 		"fleet, no trust":  {"fleet", "--tokens-file", "tokens.txt"},
@@ -86,6 +87,23 @@ func TestRatesOverrideThePreset(t *testing.T) {
 	}
 	if sc.Faults.Drop != 0.2 || sc.Faults.Unhealthy != 0.05 {
 		t.Fatalf("faults = %+v", sc.Faults)
+	}
+
+	flags = flag.NewFlagSet("test", flag.ContinueOnError)
+	c = commonFlags(flags, time.Minute, time.Hour)
+	if err := flags.Parse([]string{"--min-observations", "20", "--on-breach", "rollback"}); err != nil {
+		t.Fatal(err)
+	}
+	if sc, err = c.scenario("fleet"); err != nil {
+		t.Fatal(err)
+	}
+	for i, stage := range sc.Policy.Stages {
+		if stage.MinObservations == nil || *stage.MinObservations != 20 {
+			t.Fatalf("stage %d minimum = %v, want 20", i, stage.MinObservations)
+		}
+	}
+	if sc.Policy.Safety.OnBreach != "rollback" {
+		t.Fatalf("on breach = %q", sc.Policy.Safety.OnBreach)
 	}
 
 	// Left unset, the preset's own rates stand.

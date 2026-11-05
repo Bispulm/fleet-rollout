@@ -93,6 +93,7 @@ type common struct {
 	dropRate       *float64
 	badReleaseRate *float64
 	onBreach       *string
+	minObs         *int
 }
 
 func commonFlags(flags *flag.FlagSet, soak, maxTime time.Duration) common {
@@ -109,6 +110,8 @@ func commonFlags(flags *flag.FlagSet, soak, maxTime time.Duration) common {
 		badReleaseRate: flags.Float64("bad-release-rate", -1,
 			"share of devices on which the release fails its health check (default: the preset's)"),
 		onBreach: flags.String("on-breach", "halt", "what a breach does: halt, or rollback to restore what devices ran before"),
+		minObs: flags.Int("min-observations", 0,
+			"outcomes each stage needs before its failure rate counts (default: the control plane's)"),
 	}
 }
 
@@ -139,6 +142,14 @@ func (c common) scenario(defaultFleet string) (sim.Scenario, error) {
 	sc.Fleet = *c.fleet
 	if sc.Fleet == "" {
 		sc.Fleet = defaultFleet
+	}
+	if *c.minObs < 0 {
+		return sim.Scenario{}, errors.New("--min-observations can't be negative")
+	}
+	if *c.minObs > 0 {
+		for i := range sc.Policy.Stages {
+			sc.Policy.Stages[i].MinObservations = c.minObs
+		}
 	}
 	switch onBreach := rollout.OnBreach(*c.onBreach); onBreach {
 	case rollout.OnBreachHalt, rollout.OnBreachRollback:
