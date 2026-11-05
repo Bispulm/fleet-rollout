@@ -75,8 +75,8 @@
     {
       "id": 2,
       "type": "stat",
-      "title": "Halts in range",
-      "description": "Rollouts the engine halted, by reason, over the selected time range.",
+      "title": "Halted rollouts",
+      "description": "Rollouts that halted, read from the control plane: until they finish, and for an hour after.",
       "gridPos": {
         "x": 6,
         "y": 0,
@@ -108,7 +108,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(increase(fleet_rollout_rollout_halts_total[$__range])) or vector(0)"
+          "expr": "count(fleet_rollout_rollout_halt_info) or vector(0)"
         }
       ]
     },

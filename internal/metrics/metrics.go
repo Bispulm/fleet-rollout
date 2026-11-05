@@ -158,6 +158,9 @@ const scrapeTimeout = 5 * time.Second
 var (
 	rolloutInfo = prometheus.NewDesc(namespace+"_rollout_info",
 		"1 for each recent rollout, labeled with its state.", []string{"rollout_id", "fleet", "rollout", "state"}, nil)
+	rolloutHalt = prometheus.NewDesc(namespace+"_rollout_halt_info",
+		"1 for each recent rollout that halted, labeled with why. Unlike the halts counter, it doesn't depend on a scrape "+
+			"having happened before the halt.", []string{"rollout_id", "fleet", "rollout", "reason"}, nil)
 	rolloutStage = prometheus.NewDesc(namespace+"_rollout_current_stage",
 		"The stage a rollout is on.", []string{"rollout_id", "fleet", "rollout"}, nil)
 	stageDevices = prometheus.NewDesc(namespace+"_stage_devices",
@@ -174,7 +177,7 @@ type rolloutCollector struct {
 }
 
 func (c *rolloutCollector) Describe(ch chan<- *prometheus.Desc) {
-	for _, d := range []*prometheus.Desc{rolloutInfo, rolloutStage, stageDevices, rollbackDevices, scrapeErrors} {
+	for _, d := range []*prometheus.Desc{rolloutInfo, rolloutHalt, rolloutStage, stageDevices, rollbackDevices, scrapeErrors} {
 		ch <- d
 	}
 }
@@ -192,6 +195,9 @@ func (c *rolloutCollector) Collect(ch chan<- prometheus.Metric) {
 	for _, r := range rollouts {
 		labels := []string{r.ID, r.FleetName, r.Name}
 		ch <- prometheus.MustNewConstMetric(rolloutInfo, prometheus.GaugeValue, 1, append(labels, string(r.State))...)
+		if r.HaltReason != nil {
+			ch <- prometheus.MustNewConstMetric(rolloutHalt, prometheus.GaugeValue, 1, append(labels, *r.HaltReason)...)
+		}
 		if r.CurrentStage != nil {
 			ch <- prometheus.MustNewConstMetric(rolloutStage, prometheus.GaugeValue, float64(*r.CurrentStage), labels...)
 		}

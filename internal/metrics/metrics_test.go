@@ -131,4 +131,68 @@ func TestRolloutStateIsReadAtEachScrape(t *testing.T) {
 	requireLine(t, body, `fleet_rollout_rollout_current_stage{`+labels+`} 1`)
 	requireLine(t, body, fmt.Sprintf(`fleet_rollout_stage_devices{fleet="lab-a",outcome="pending",rollout="demo",rollout_id="%s",stage="1"} 5`, created.ID))
 	requireLine(t, body, `fleet_rollout_rollout_scrape_errors 0`)
+	if strings.Contains(body, "fleet_rollout_rollout_halt_info{") {
+		t.Fatal("a running rollout was reported as halted")
+	}
+
+	// A halt stays visible as long as the rollout is listed, however scrapes and halts line up.
+	if _, err := s.AbortRollout(ctx, created.ID, store.TransitionOptions{Actor: "test"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAHaltedRolloutIsReportedWithItsReason(t *testing.T) {
+	ctx := context.Background()
+	pool := testdb.New(t)
+	s := store.New(pool)
+	id := startedRollout(t, ctx, s)
+	if _, err := pool.Exec(ctx, `UPDATE rollouts SET state = 'halted', revision = revision + 1,
+		halt_reason = 'stage_breach', halt_detail = 'stage 1: 3 failed' WHERE id = $1`, id); err != nil {
+		t.Fatal(err)
+	}
+	m := metrics.New()
+	m.ObserveRollouts(s, slog.New(slog.DiscardHandler))
+	requireLine(t, scrape(t, m), fmt.Sprintf(
+		`fleet_rollout_rollout_halt_info{fleet="lab-a",reason="stage_breach",rollout="demo",rollout_id="%s"} 1`, id))
+}
+
+// startedRollout makes a fleet of 10 devices with a started rollout of two stages.
+func startedRollout(t *testing.T, ctx context.Context, s *store.Store) string {
+	t.Helper()
+	if _, err := s.CreateFleet(ctx, "lab-a", nil); err != nil {
+		t.Fatal(err)
+	}
+	devices := make([]store.NewDevice, 10)
+	for i := range devices {
+		id := fmt.Sprintf("sim-%05d", i)
+		devices[i] = store.NewDevice{ID: id, Platform: "linux/arm64", CredentialHash: sha256.Sum256([]byte(id))}
+	}
+	if _, err := s.RegisterDevices(ctx, "lab-a", devices); err != nil {
+		t.Fatal(err)
+	}
+	artifact, _, err := s.RegisterArtifact(ctx, store.NewArtifact{
+		Name: "demo-app", Version: "1.0.0", Platform: "linux/arm64", ReleaseCounter: 1, SizeBytes: 10,
+		SHA256: sha256.Sum256([]byte("x")), ChunkSize: 10, Envelope: []byte(`{}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkArtifactContentReady(ctx, artifact.ID); err != nil {
+		t.Fatal(err)
+	}
+	policy, err := rollout.PolicySpec{
+		Stages: []rollout.StageSpec{{Percent: 50}, {Percent: 100}},
+		Safety: rollout.SafetySpec{MaxFailureBPS: new(200)},
+	}.Normalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, _, err := s.CreateRollout(ctx, "lab-a", store.NewRollout{Name: "demo", ArtifactID: artifact.ID, Policy: policy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartRollout(ctx, created.ID, store.TransitionOptions{Actor: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	return created.ID
 }
