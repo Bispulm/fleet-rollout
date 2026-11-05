@@ -136,7 +136,10 @@ func (r *RolloutReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return r.fail(ctx, &res, original, err)
 	}
 
-	current, err = r.steer(ctx, &res, current)
+	// The generation moves when the spec changes, and the observed generation catches up only
+	// once a pass succeeds, so a change that couldn't be applied yet is tried again.
+	specChanged := res.Status.ObservedGeneration != res.Generation
+	current, err = r.steer(ctx, &res, current, specChanged)
 	if err != nil {
 		return r.fail(ctx, &res, original, err)
 	}
@@ -183,12 +186,16 @@ func (r *RolloutReconciler) create(ctx context.Context, res, original *v1alpha1.
 	return created, nil, nil
 }
 
-// steer starts the rollout, and pauses or resumes it to match the resource.
-func (r *RolloutReconciler) steer(ctx context.Context, res *v1alpha1.Rollout, current apiv1.Rollout) (apiv1.Rollout, error) {
+// steer starts the rollout, unless it's meant to be paused, and pauses or resumes it when the
+// resource's paused setting has changed. A pause or resume made some other way, through rolloutctl
+// during an incident, say, stands until the resource changes, rather than being undone.
+func (r *RolloutReconciler) steer(ctx context.Context, res *v1alpha1.Rollout, current apiv1.Rollout, specChanged bool) (apiv1.Rollout, error) {
 	var action, reason string
 	switch {
-	case current.State == rollout.StateDraft:
+	case current.State == rollout.StateDraft && !res.Spec.Paused:
 		action, reason = apiclient.ActionStart, "started by the Rollout resource"
+	case !specChanged:
+		return current, nil
 	case res.Spec.Paused && (current.State == rollout.StateRunning || current.State == rollout.StateSoaking):
 		action, reason = apiclient.ActionPause, "paused by the Rollout resource"
 	case !res.Spec.Paused && current.State == rollout.StatePaused:
@@ -222,9 +229,9 @@ func (r *RolloutReconciler) finalize(ctx context.Context, res *v1alpha1.Rollout)
 	return r.Client.Update(ctx, res)
 }
 
-// wait records something a person has to fix, and checks again later.
+// wait records something a person has to fix, and checks again later. The observed generation
+// stays where it was, because this generation hasn't been applied.
 func (r *RolloutReconciler) wait(ctx context.Context, res, original *v1alpha1.Rollout, reason, message string) (ctrl.Result, error) {
-	res.Status.ObservedGeneration = res.Generation
 	setReady(&res.Status.Conditions, res.Generation, metav1.ConditionFalse, reason, message)
 	if err := r.Client.Status().Patch(ctx, res, client.MergeFrom(original)); err != nil {
 		return ctrl.Result{}, err

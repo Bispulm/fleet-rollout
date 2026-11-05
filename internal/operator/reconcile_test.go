@@ -148,6 +148,26 @@ func (w *world) getRollout(name string) *v1alpha1.Rollout {
 	return &out
 }
 
+// editSpec changes a Rollout's spec, bumping its generation as the API server would.
+func (w *world) editSpec(name string, edit func(*v1alpha1.RolloutSpec)) {
+	w.t.Helper()
+	got := w.getRollout(name)
+	edit(&got.Spec)
+	got.Generation++
+	if err := w.kube.Update(w.ctx, got); err != nil {
+		w.t.Fatal(err)
+	}
+}
+
+func (w *world) controlPlaneState(res *v1alpha1.Rollout) rollout.State {
+	w.t.Helper()
+	got, err := w.api.GetRollout(w.ctx, string(res.UID))
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	return got.State
+}
+
 func ready(conditions []metav1.Condition) *metav1.Condition {
 	return apimeta.FindStatusCondition(conditions, conditionReady)
 }
@@ -268,19 +288,68 @@ func TestPausedPausesAndResumes(t *testing.T) {
 		paused bool
 		want   rollout.State
 	}{{true, rollout.StatePaused}, {false, rollout.StateRunning}} {
-		got := w.getRollout(res.Name)
-		got.Spec.Paused = tc.paused
-		if err := w.kube.Update(w.ctx, got); err != nil {
-			t.Fatal(err)
-		}
+		w.editSpec(res.Name, func(spec *v1alpha1.RolloutSpec) { spec.Paused = tc.paused })
 		w.reconcileRollout(res.Name)
-		cp, err := w.api.GetRollout(w.ctx, string(res.UID))
-		if err != nil || cp.State != tc.want {
-			t.Fatalf("paused = %v: control plane state = %s, %v", tc.paused, cp.State, err)
+		if got := w.controlPlaneState(res); got != tc.want {
+			t.Fatalf("paused = %v: control plane state = %s", tc.paused, got)
 		}
 		if phase := w.getRollout(res.Name).Status.Phase; phase != string(tc.want) {
 			t.Fatalf("paused = %v: phase = %q", tc.paused, phase)
 		}
+	}
+}
+
+func TestARolloutCreatedPausedWaitsToStart(t *testing.T) {
+	w := newWorld(t)
+	w.fleetWithDevices("lab-a", 10)
+	w.push("1.4.0", 14)
+	res := rolloutResource("demo", "lab-a", "1.4.0")
+	res.Spec.Paused = true
+	w.create(res)
+
+	w.reconcileRollout(res.Name)
+	w.reconcileRollout(res.Name)
+	if got := w.controlPlaneState(res); got != rollout.StateDraft {
+		t.Fatalf("control plane state = %s, want a draft that exposes nobody", got)
+	}
+	w.editSpec(res.Name, func(spec *v1alpha1.RolloutSpec) { spec.Paused = false })
+	w.reconcileRollout(res.Name)
+	if got := w.controlPlaneState(res); got != rollout.StateRunning {
+		t.Fatalf("control plane state = %s after unpausing", got)
+	}
+}
+
+// A pause made during an incident, through rolloutctl or the API, mustn't be undone by the
+// operator because the resource still says to run. Only a change to the resource acts.
+func TestAPauseOrResumeMadeElsewhereStands(t *testing.T) {
+	w := newWorld(t)
+	w.fleetWithDevices("lab-a", 10)
+	w.push("1.4.0", 14)
+	res := rolloutResource("demo", "lab-a", "1.4.0")
+	w.create(res)
+	w.reconcileRollout(res.Name)
+
+	transition := func(action string) {
+		t.Helper()
+		if _, err := w.api.Transition(w.ctx, string(res.UID), action, apiv1.TransitionRequest{Reason: "by hand"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	transition(apiclient.ActionPause)
+	w.reconcileRollout(res.Name)
+	if got := w.controlPlaneState(res); got != rollout.StatePaused {
+		t.Fatalf("control plane state = %s; the operator undid a pause made elsewhere", got)
+	}
+	if phase := w.getRollout(res.Name).Status.Phase; phase != "paused" {
+		t.Fatalf("phase = %q, want the status to show the pause", phase)
+	}
+
+	w.editSpec(res.Name, func(spec *v1alpha1.RolloutSpec) { spec.Paused = true })
+	w.reconcileRollout(res.Name)
+	transition(apiclient.ActionResume)
+	w.reconcileRollout(res.Name)
+	if got := w.controlPlaneState(res); got != rollout.StateRunning {
+		t.Fatalf("control plane state = %s; the operator undid a resume made elsewhere", got)
 	}
 }
 
