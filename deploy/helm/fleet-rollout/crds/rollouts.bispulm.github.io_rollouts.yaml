@@ -1,0 +1,335 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.23.0
+  name: rollouts.rollouts.bispulm.github.io
+spec:
+  group: rollouts.bispulm.github.io
+  names:
+    kind: Rollout
+    listKind: RolloutList
+    plural: rollouts
+    singular: rollout
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.fleetRef
+      name: Fleet
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.currentStage
+      name: Stage
+      type: integer
+    - jsonPath: .status.waiting
+      name: Waiting
+      priority: 1
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          Rollout is a staged rollout. Applying one creates and starts the rollout in the control
+          plane. Deleting one aborts a rollout that hasn't finished. Rollout names are unique per fleet
+          in the control plane, and fleets are global, so the resource is cluster-scoped.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              RolloutSpec describes a staged rollout of one artifact to one fleet. Everything but Paused is
+              fixed once the rollout exists, because the control plane freezes a rollout's policy when it
+              starts.
+            properties:
+              artifact:
+                description: ArtifactRef names a signed artifact already pushed to
+                  the control plane.
+                properties:
+                  name:
+                    pattern: ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$
+                    type: string
+                  platform:
+                    description: Platform is the devices' platform, as os/arch.
+                    pattern: ^[a-z0-9]+/[a-z0-9]+$
+                    type: string
+                  version:
+                    pattern: ^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$
+                    type: string
+                required:
+                - name
+                - platform
+                - version
+                type: object
+                x-kubernetes-validations:
+                - message: only paused can change once a rollout exists
+                  rule: self == oldSelf
+              excludeDevices:
+                description: ExcludeDevices lists devices to leave out. Longer lists
+                  can be given through rolloutctl.
+                items:
+                  maxLength: 128
+                  type: string
+                maxItems: 1000
+                type: array
+                x-kubernetes-validations:
+                - message: only paused can change once a rollout exists
+                  rule: self == oldSelf
+              fleetRef:
+                description: FleetRef is the name of the fleet to roll out to.
+                pattern: ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$
+                type: string
+                x-kubernetes-validations:
+                - message: only paused can change once a rollout exists
+                  rule: self == oldSelf
+              paused:
+                description: Paused pauses a rollout that's progressing, and resumes
+                  it when cleared.
+                type: boolean
+              safety:
+                description: |-
+                  Safety holds the limits that halt a rollout. Rates are percentages such as "2%" or
+                  "0.25%".
+                properties:
+                  maxFailureRate:
+                    description: MaxFailureRate is the highest failure rate allowed
+                      within a stage's own cohort.
+                    pattern: ^[0-9]+(\.[0-9]{1,2})?%$
+                    type: string
+                  maxUnknown:
+                    description: MaxUnknown is the largest share of devices that may
+                      go unheard from.
+                    pattern: ^[0-9]+(\.[0-9]{1,2})?%$
+                    type: string
+                  onBreach:
+                    description: OnBreach is what happens when a limit is crossed.
+                    enum:
+                    - Halt
+                    - Rollback
+                    type: string
+                  requiredCoverage:
+                    description: RequiredCoverage is the share of a stage that must
+                      have an outcome before it can pass.
+                    pattern: ^[0-9]+(\.[0-9]{1,2})?%$
+                    type: string
+                  rolloutMaxFailureRate:
+                    description: |-
+                      RolloutMaxFailureRate is the highest failure rate allowed across every exposed device.
+                      It defaults to MaxFailureRate.
+                    pattern: ^[0-9]+(\.[0-9]{1,2})?%$
+                    type: string
+                  staleAfter:
+                    description: StaleAfter is how long without hearing from a device
+                      before it counts as unknown.
+                    type: string
+                required:
+                - maxFailureRate
+                type: object
+                x-kubernetes-validations:
+                - message: only paused can change once a rollout exists
+                  rule: self == oldSelf
+              selector:
+                additionalProperties:
+                  type: string
+                description: Selector limits the rollout to devices with all of these
+                  labels.
+                maxProperties: 32
+                type: object
+                x-kubernetes-validations:
+                - message: only paused can change once a rollout exists
+                  rule: self == oldSelf
+              stages:
+                items:
+                  description: Stage is one step of a rollout.
+                  properties:
+                    deadline:
+                      description: Deadline is how long the stage may take to reach
+                        its coverage and soak.
+                      type: string
+                    minObservations:
+                      description: MinObservations is the fewest outcomes the stage
+                        needs before it can pass.
+                      minimum: 1
+                      type: integer
+                    percent:
+                      description: Percent of the fleet exposed once this stage opens,
+                        counting earlier stages.
+                      maximum: 100
+                      minimum: 1
+                      type: integer
+                    soak:
+                      description: Soak is how long the stage must stay healthy before
+                        the next one opens.
+                      type: string
+                  required:
+                  - percent
+                  type: object
+                maxItems: 20
+                minItems: 1
+                type: array
+                x-kubernetes-validations:
+                - message: only paused can change once a rollout exists
+                  rule: self == oldSelf
+            required:
+            - artifact
+            - fleetRef
+            - safety
+            - stages
+            type: object
+            x-kubernetes-validations:
+            - message: only paused can change once a rollout exists
+              rule: has(self.selector) == has(oldSelf.selector) && has(self.excludeDevices)
+                == has(oldSelf.excludeDevices)
+          status:
+            description: RolloutStatus is what the control plane reports about the
+              rollout.
+            properties:
+              artifactID:
+                description: ArtifactID is the ID of the artifact the rollout delivers.
+                type: string
+              conditions:
+                description: Conditions report whether the rollout exists in the control
+                  plane, and anything stopping it.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              currentStage:
+                description: CurrentStage is the ordinal of the stage in progress.
+                type: integer
+              haltDetail:
+                type: string
+              haltReason:
+                description: HaltReason and HaltDetail say why a halted rollout stopped.
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the generation this status describes.
+                format: int64
+                type: integer
+              phase:
+                description: Phase is the rollout's state in the control plane, such
+                  as running, halted, or completed.
+                type: string
+              rolloutID:
+                description: RolloutID is the rollout's ID in the control plane, which
+                  is this resource's UID.
+                type: string
+              stages:
+                items:
+                  description: StageStatus is a stage's progress, as the control plane
+                    counts it.
+                  properties:
+                    cohort:
+                      description: Cohort is how many devices the stage newly exposes,
+                        once it's known.
+                      type: integer
+                    failed:
+                      type: integer
+                    inFlight:
+                      type: integer
+                    ordinal:
+                      type: integer
+                    pending:
+                      type: integer
+                    percent:
+                      type: integer
+                    state:
+                      type: string
+                    succeeded:
+                      type: integer
+                    unknown:
+                      type: integer
+                  required:
+                  - failed
+                  - inFlight
+                  - ordinal
+                  - pending
+                  - percent
+                  - state
+                  - succeeded
+                  - unknown
+                  type: object
+                type: array
+              waiting:
+                description: Waiting says what the rollout is waiting for.
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

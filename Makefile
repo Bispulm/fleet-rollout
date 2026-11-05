@@ -2,6 +2,7 @@
 
 DEV_DATABASE_URL ?= postgres://rollout:rollout_dev@127.0.0.1:15431/rollout?sslmode=disable
 TEST_DATABASE_URL ?= postgres://rollout:rollout_dev@127.0.0.1:15431/postgres?sslmode=disable
+CONTROLLER_GEN := go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.23.0
 
 .PHONY: help
 help: ## Show available targets
@@ -10,6 +11,11 @@ help: ## Show available targets
 .PHONY: build
 build: ## Build all binaries into ./bin
 	go build -o bin/ ./cmd/...
+
+.PHONY: generate
+generate: ## Generate deep copy code and CRDs from api/
+	$(CONTROLLER_GEN) object paths=./api/...
+	$(CONTROLLER_GEN) crd paths=./api/... output:crd:artifacts:config=deploy/helm/fleet-rollout/crds
 
 .PHONY: test
 test: ## Run unit tests; database tests skip without a database
