@@ -43,7 +43,7 @@ func newFixture(t *testing.T, ctx context.Context) fixture {
 	f := fixture{pool: testdb.New(t), deviceID: "sim-001"}
 	mustScan(t, f.pool.QueryRow(ctx, `INSERT INTO fleets (name) VALUES ('lab-a') RETURNING id`), &f.fleetID)
 	mustExec(t, ctx, f.pool, `INSERT INTO devices (id, fleet_id, platform, credential_hash)
-		VALUES ($1, $2, 'linux/arm64', $3)`, f.deviceID, f.fleetID, make([]byte, 32))
+		VALUES ($1, $2, 'linux/arm64', sha256($1::text::bytea))`, f.deviceID, f.fleetID)
 	mustScan(t, f.pool.QueryRow(ctx, `INSERT INTO artifacts (name, version, platform, release_counter, size_bytes, sha256)
 		VALUES ('demo', '1.0.0', 'linux/arm64', 10, 1024, $1) RETURNING id`, make([]byte, 32)), &f.artifact)
 	f.rolloutID = f.insertRollout(t, ctx, "first")
@@ -179,7 +179,7 @@ func TestMembershipFreezesWhenRolloutLeavesDraft(t *testing.T) {
 	}
 
 	mustExec(t, ctx, f.pool, `INSERT INTO devices (id, fleet_id, platform, credential_hash)
-		VALUES ('sim-002', $1, 'linux/arm64', $2)`, f.fleetID, make([]byte, 32))
+		VALUES ('sim-002', $1, 'linux/arm64', sha256('sim-002'))`, f.fleetID)
 	requireSQLState(t, f.addMember(ctx, f.rolloutID, "sim-002"), sqlRestrictViolation)
 
 	_, err := f.pool.Exec(ctx, `UPDATE rollout_members SET position = 9 WHERE rollout_id = $1`, f.rolloutID)
@@ -199,7 +199,7 @@ func TestMemberPositionsAreUnique(t *testing.T) {
 		t.Fatalf("add member: %v", err)
 	}
 	mustExec(t, ctx, f.pool, `INSERT INTO devices (id, fleet_id, platform, credential_hash)
-		VALUES ('sim-002', $1, 'linux/arm64', $2)`, f.fleetID, make([]byte, 32))
+		VALUES ('sim-002', $1, 'linux/arm64', sha256('sim-002'))`, f.fleetID)
 	requireSQLState(t, f.addMember(ctx, f.rolloutID, "sim-002"), sqlUniqueViolation)
 }
 
@@ -269,16 +269,26 @@ func (f fixture) assign(ctx context.Context, generation int) (string, error) {
 func TestDeviceHasAtMostOneOpenAssignment(t *testing.T) {
 	ctx := testContext(t)
 	f := exposedFixture(t, ctx)
+	assignRollback := func() error {
+		_, err := f.pool.Exec(ctx, `INSERT INTO assignments
+			(rollout_id, device_id, generation, kind, stage_ordinal, issued_at, expires_at)
+			VALUES ($1, $2, 2, 'rollback', 1, now(), now() + interval '1 hour')`, f.rolloutID, f.deviceID)
+		return err
+	}
 
 	first, err := f.assign(ctx, 1)
 	if err != nil {
 		t.Fatalf("first assignment: %v", err)
 	}
-	_, err = f.assign(ctx, 2)
+	err = assignRollback()
 	requireSQLState(t, err, sqlUniqueViolation)
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.ConstraintName != "assignments_one_open_per_device" {
+		t.Fatalf("error = %v, want a violation of the one-open-assignment index", err)
+	}
 
 	mustExec(t, ctx, f.pool, `UPDATE assignments SET state = 'superseded', finished_at = now() WHERE id = $1`, first)
-	if _, err := f.assign(ctx, 2); err != nil {
+	if err := assignRollback(); err != nil {
 		t.Fatalf("assignment after the first finished: %v", err)
 	}
 }
@@ -299,7 +309,7 @@ func TestAssignmentRequiresRolloutMembership(t *testing.T) {
 	ctx := testContext(t)
 	f := exposedFixture(t, ctx)
 	mustExec(t, ctx, f.pool, `INSERT INTO devices (id, fleet_id, platform, credential_hash)
-		VALUES ('outsider', $1, 'linux/arm64', $2)`, f.fleetID, make([]byte, 32))
+		VALUES ('outsider', $1, 'linux/arm64', sha256('outsider'))`, f.fleetID)
 	_, err := f.pool.Exec(ctx, `INSERT INTO assignments
 		(rollout_id, device_id, kind, stage_ordinal, issued_at, expires_at)
 		VALUES ($1, 'outsider', 'forward', 1, now(), now() + interval '1 hour')`, f.rolloutID)
@@ -317,15 +327,52 @@ func TestFinishedAtMatchesTerminalAssignmentState(t *testing.T) {
 	requireSQLState(t, err, sqlCheckViolation)
 	_, err = f.pool.Exec(ctx, `UPDATE assignments SET finished_at = now() WHERE id = $1`, id)
 	requireSQLState(t, err, sqlCheckViolation)
-	// A stale device can still report late, so stale isn't terminal.
-	mustExec(t, ctx, f.pool, `UPDATE assignments SET state = 'stale' WHERE id = $1`, id)
+	// Unknown is derived from when a device was last heard from, not stored.
+	_, err = f.pool.Exec(ctx, `UPDATE assignments SET state = 'stale' WHERE id = $1`, id)
+	requireSQLState(t, err, sqlCheckViolation)
+}
+
+func TestMemberHasAtMostOneForwardAssignmentPerRollout(t *testing.T) {
+	ctx := testContext(t)
+	f := exposedFixture(t, ctx)
+	first, err := f.assign(ctx, 1)
+	if err != nil {
+		t.Fatalf("first assignment: %v", err)
+	}
+	mustExec(t, ctx, f.pool, `UPDATE assignments SET state = 'failed', finished_at = now() WHERE id = $1`, first)
+
+	// A second generation would count this device's outcome twice.
+	_, err = f.assign(ctx, 2)
+	requireSQLState(t, err, sqlUniqueViolation)
+
+	// A rollback is a different kind of instruction, so it's allowed.
+	mustExec(t, ctx, f.pool, `INSERT INTO assignments
+		(rollout_id, device_id, generation, kind, stage_ordinal, issued_at, expires_at)
+		VALUES ($1, $2, 2, 'rollback', 1, now(), now() + interval '1 hour')`, f.rolloutID, f.deviceID)
+}
+
+func TestDeviceCredentialsAreUnique(t *testing.T) {
+	ctx := testContext(t)
+	f := newFixture(t, ctx)
+	_, err := f.pool.Exec(ctx, `INSERT INTO devices (id, fleet_id, platform, credential_hash)
+		VALUES ('sim-002', $1, 'linux/arm64', sha256($2::text::bytea))`, f.fleetID, f.deviceID)
+	requireSQLState(t, err, sqlUniqueViolation)
+}
+
+func TestEngineLeaseHasOneRowPerName(t *testing.T) {
+	ctx := testContext(t)
+	f := newFixture(t, ctx)
+	insert := `INSERT INTO engine_lease (name, holder, generation, expires_at) VALUES ('rollout-engine', 'a', 1, now())`
+	mustExec(t, ctx, f.pool, insert)
+	_, err := f.pool.Exec(ctx, insert)
+	requireSQLState(t, err, sqlUniqueViolation)
 }
 
 func TestDeviceEventsAreAppendOnlyAndSequenced(t *testing.T) {
 	ctx := testContext(t)
 	f := exposedFixture(t, ctx)
-	insert := `INSERT INTO device_events (device_id, sequence, type, payload_digest, received_at)
-		VALUES ($1, $2, 'progress', $3, now())`
+	insert := `INSERT INTO device_events (device_id, sequence, type, payload_digest, received_at, applied)
+		VALUES ($1, $2, 'progress', $3, now(), true)`
 	digest := make([]byte, 32)
 	mustExec(t, ctx, f.pool, insert, f.deviceID, 1, digest)
 

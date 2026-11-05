@@ -1,6 +1,7 @@
 package store_test
 
 import (
+	"crypto/sha256"
 	"errors"
 	"slices"
 	"sync"
@@ -271,7 +272,7 @@ func TestEnrollmentAndStatusChangesAfterStartDoNotChangeMembership(t *testing.T)
 		t.Fatalf("ListCohort: %v", err)
 	}
 
-	late := []store.NewDevice{{ID: "late-enrollee", Platform: "linux/arm64"}}
+	late := []store.NewDevice{{ID: "late-enrollee", Platform: "linux/arm64", CredentialHash: sha256.Sum256([]byte("late-enrollee"))}}
 	if _, err := s.RegisterDevices(ctx, "lab-a", late); err != nil {
 		t.Fatalf("RegisterDevices: %v", err)
 	}
