@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"maps"
@@ -208,7 +209,9 @@ func (f createFlags) request(cmd *cobra.Command) (apiv1.CreateRolloutRequest, er
 }
 
 func (a *app) rolloutStatusCommand() *cobra.Command {
-	return &cobra.Command{
+	var watch bool
+	var interval time.Duration
+	cmd := &cobra.Command{
 		Use:   "status <id>",
 		Short: "Show a rollout's state, policy, and stages",
 		Args:  cobra.ExactArgs(1),
@@ -217,6 +220,9 @@ func (a *app) rolloutStatusCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if watch {
+				return a.watchRollout(cmd.Context(), c, args[0], interval)
+			}
 			found, err := c.GetRollout(cmd.Context(), args[0])
 			if err != nil {
 				return err
@@ -224,6 +230,108 @@ func (a *app) rolloutStatusCommand() *cobra.Command {
 			return a.printRollout(found)
 		},
 	}
+	cmd.Flags().BoolVarP(&watch, "watch", "w", false,
+		"print each change until the rollout finishes or stops for a person, and fail unless it completed")
+	cmd.Flags().DurationVar(&interval, "interval", 2*time.Second, "how often --watch checks")
+	return cmd
+}
+
+// watchRollout prints a line each time the rollout changes, until it reaches a state that
+// only a person can move it on from, and then its full status. It fails unless the rollout
+// completed, so that a script can wait on it.
+func (a *app) watchRollout(ctx context.Context, c *client.Client, id string, interval time.Duration) error {
+	if interval <= 0 {
+		return errors.New("--interval must be positive")
+	}
+	var r apiv1.Rollout
+	var last string
+	for {
+		found, err := c.GetRollout(ctx, id)
+		switch {
+		case err == nil:
+			r = found
+			if line := progressLine(r); line != last {
+				last = line
+				if err := a.printProgress(r, line); err != nil {
+					return err
+				}
+			}
+			if watchEnds(r.State) {
+				return a.finishWatch(r)
+			}
+		case !client.IsRetryable(err):
+			return err
+		}
+		// A retryable failure, such as the server shedding load, is tried again next time.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(interval):
+		}
+	}
+}
+
+func (a *app) printProgress(r apiv1.Rollout, line string) error {
+	if a.output == outputJSON {
+		return a.printJSON(r)
+	}
+	_, err := fmt.Fprintf(a.stdout, "%s  %s\n", time.Now().Format(time.TimeOnly), line)
+	return err
+}
+
+func (a *app) finishWatch(r apiv1.Rollout) error {
+	if a.output != outputJSON {
+		if _, err := fmt.Fprintln(a.stdout); err != nil {
+			return err
+		}
+		if err := a.printRollout(r); err != nil {
+			return err
+		}
+	}
+	if r.State == rollout.StateCompleted {
+		return nil
+	}
+	if r.HaltReason != "" {
+		return fmt.Errorf("rollout %s ended %s: %s: %s", r.ID, r.State, r.HaltReason, r.HaltDetail)
+	}
+	return fmt.Errorf("rollout %s ended %s", r.ID, r.State)
+}
+
+// watchEnds reports whether a rollout is in a state that nothing but a person can move it on
+// from. A paused rollout isn't, since pauses are usually short.
+func watchEnds(state rollout.State) bool {
+	switch state {
+	case rollout.StateCompleted, rollout.StateHalted, rollout.StateRolledBack, rollout.StateRollbackIncomplete,
+		rollout.StateAborted:
+		return true
+	}
+	return false
+}
+
+// progressLine summarizes a rollout in one line: its state, the current stage's devices, and
+// what it's waiting for.
+func progressLine(r apiv1.Rollout) string {
+	var b strings.Builder
+	b.WriteString(string(r.State))
+	if r.CurrentStage != nil {
+		for _, st := range r.Stages {
+			if st.Ordinal != *r.CurrentStage {
+				continue
+			}
+			fmt.Fprintf(&b, "  stage %d of %d: %d ok, %d failed, %d in flight, %d pending", st.Ordinal, len(r.Stages),
+				st.Succeeded, st.Failed, st.InFlight, st.Pending)
+			if st.Unknown > 0 {
+				fmt.Fprintf(&b, ", %d unknown", st.Unknown)
+			}
+		}
+	}
+	if rb := r.Rollback; rb != nil {
+		fmt.Fprintf(&b, "  rollback: %d of %d restored, %d failed", rb.Restored, rb.Needed, rb.Failed)
+	}
+	if r.Waiting != "" {
+		b.WriteString("  waiting: " + r.Waiting)
+	}
+	return b.String()
 }
 
 func (a *app) rolloutActionCommand(action, short string) *cobra.Command {

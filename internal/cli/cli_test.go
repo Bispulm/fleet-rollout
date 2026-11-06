@@ -603,3 +603,72 @@ func TestARollbackFromTheCommandLine(t *testing.T) {
 		t.Fatalf("Poll = %+v, err = %v; want a rollback to release 3", polled.Assignment, err)
 	}
 }
+
+func TestStatusWatchFollowsARolloutUntilItStops(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun("fleet", "create", "lab-a")
+	file := filepath.Join(t.TempDir(), "a.bin")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	artifact := mustJSON[apiv1.Artifact](e, "artifact", "push", "--name", "demo", "--version", "1.0.0",
+		"--platform", "linux/arm64", "--release", "1", "--file", file, "--key", e.key)
+	registered := mustJSON[apiv1.DeviceList](e, "device", "register", "--fleet", "lab-a", "--id", "watch-1", "--platform", "linux/arm64")
+	r := mustJSON[apiv1.Rollout](e, "rollout", "create", "--fleet", "lab-a", "--name", "demo", "--artifact", artifact.ID,
+		"--stages", "100", "--max-failure-rate", "2%")
+	e.mustRun("rollout", "start", r.ID)
+
+	type result struct {
+		out string
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		out, err := e.run("rollout", "status", r.ID, "--watch", "--interval", "20ms")
+		done <- result{out, err}
+	}()
+	// Let the watch see the rollout running before it changes.
+	time.Sleep(200 * time.Millisecond)
+
+	device := client.NewDevice(e.base, registered.Devices[0].Token, nil)
+	polled, err := device.Poll(t.Context())
+	if err != nil || polled.Assignment == nil {
+		t.Fatalf("Poll = %+v, err = %v", polled, err)
+	}
+	a := polled.Assignment
+	if _, err := device.Report(t.Context(), apiv1.ReportRequest{
+		Sequence: 1, RolloutID: a.RolloutID, AssignmentID: a.ID, Generation: a.Generation,
+		State: rollout.AssignmentFailed, Reason: "unhealthy",
+	}); err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	fence, ok, err := e.store.AcquireLease(t.Context(), "test", time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("AcquireLease: ok = %v, err = %v", ok, err)
+	}
+	if _, err := e.store.AdvanceRollout(t.Context(), r.ID, fence); err != nil {
+		t.Fatalf("AdvanceRollout: %v", err)
+	}
+
+	var got result
+	select {
+	case got = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the watch didn't stop after the rollout halted")
+	}
+	// A rollout that doesn't complete fails the command, so a script can wait on it.
+	if got.err == nil || !strings.Contains(got.err.Error(), "halted") {
+		t.Fatalf("err = %v, want one saying the rollout halted", got.err)
+	}
+	running := strings.Index(got.out, "running  stage 1 of 1")
+	halted := strings.Index(got.out, "halted  stage 1 of 1: 0 ok, 1 failed")
+	if running < 0 || halted < running {
+		t.Fatalf("the watch should print the rollout running, then halted:\n%s", got.out)
+	}
+	if strings.Count(got.out, "running  stage 1 of 1: 0 ok, 0 failed, 0 in flight, 1 pending") != 1 {
+		t.Errorf("an unchanged rollout should be printed once:\n%s", got.out)
+	}
+	if !strings.Contains(got.out, "Halted:") || !strings.Contains(got.out, "STAGE") {
+		t.Errorf("the watch should end with the full status:\n%s", got.out)
+	}
+}
