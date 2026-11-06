@@ -1,0 +1,79 @@
+{
+  "machine": {
+    "os": "darwin",
+    "arch": "arm64",
+    "cpus": 14,
+    "model": "Apple M4 Pro",
+    "go": "go1.27.3",
+    "load_before": "3.72 5.91 5.53",
+    "load_after": "7.83 7.04 6.09"
+  },
+  "results": [
+    {
+      "devices": 20000,
+      "state": "completed",
+      "timed_out": false,
+      "elapsed": 204058810458,
+      "routes": {
+        "GET /v1/device/artifacts/{id}/content": {
+          "count": 40001,
+          "unavailable": 1,
+          "errors": 0,
+          "p50": 63037042,
+          "p95": 81040458,
+          "p99": 86554208,
+          "max": 98254667
+        },
+        "GET /v1/device/artifacts/{id}/manifest": {
+          "count": 21018,
+          "unavailable": 1018,
+          "errors": 0,
+          "p50": 62636208,
+          "p95": 80330584,
+          "p99": 85874417,
+          "max": 113199667
+        },
+        "POST /v1/device/poll": {
+          "count": 422337,
+          "unavailable": 23951,
+          "errors": 0,
+          "p50": 3349584,
+          "p95": 58314875,
+          "p99": 68373791,
+          "max": 183497625
+        },
+        "POST /v1/device/reports": {
+          "count": 111115,
+          "unavailable": 11115,
+          "errors": 0,
+          "p50": 52547000,
+          "p95": 72673334,
+          "p99": 80932250,
+          "max": 137689375
+        }
+      },
+      "device_requests": 594471,
+      "requests_per_second": 2913.2336832981578,
+      "shed": 36085,
+      "errors": 0,
+      "rolloutd": {
+        "cpu": 181673135000,
+        "elapsed": 205631507125,
+        "max_rss_mb": 76.140625
+      },
+      "simulator_cpu": 79935233000,
+      "simulator_peak_rss_mb": 798.0625,
+      "client_conns": 1024,
+      "postgres": {
+        "cpu_samples": 101,
+        "cpu_mean": 1.0979366336633658,
+        "cpu_peak": 2.2671,
+        "commits_per_second": 5758.643781969233,
+        "rows_written_per_second": 3808.1031554378305,
+        "rows_read_per_second": 85875.4687468237,
+        "cache_hit_ratio": 0.9999987029727216
+      },
+      "pass": false
+    }
+  ]
+}

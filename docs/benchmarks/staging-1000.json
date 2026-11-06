@@ -1,0 +1,53 @@
+{
+  "machine": {
+    "os": "darwin",
+    "arch": "arm64",
+    "cpus": 14,
+    "model": "Apple M4 Pro",
+    "go": "go1.27.3",
+    "load_before": "3.61 3.10 2.96",
+    "load_after": "3.68 3.13 2.97"
+  },
+  "results": [
+    {
+      "bad_share": 1,
+      "staged": true,
+      "state": "halted",
+      "halt": "certain_breach: stage 1: 2 failed of 2 outcomes, in a cohort of 10, above the 5.00% limit",
+      "installed": 2,
+      "failed": 2,
+      "devices": 1000,
+      "simulated_time": 60000000000
+    },
+    {
+      "bad_share": 1,
+      "staged": false,
+      "state": "halted",
+      "halt": "stage_breach: stage 1: 81 failed of 81 outcomes, in a cohort of 1000, above the 5.00% limit",
+      "installed": 81,
+      "failed": 81,
+      "devices": 1000,
+      "simulated_time": 60000000000
+    },
+    {
+      "bad_share": 0.3,
+      "staged": true,
+      "state": "halted",
+      "halt": "certain_breach: stage 1: 1 failed of 2 outcomes, in a cohort of 10, above the 5.00% limit",
+      "installed": 2,
+      "failed": 1,
+      "devices": 1000,
+      "simulated_time": 60000000000
+    },
+    {
+      "bad_share": 0.3,
+      "staged": false,
+      "state": "halted",
+      "halt": "stage_breach: stage 1: 24 failed of 81 outcomes, in a cohort of 1000, above the 5.00% limit",
+      "installed": 81,
+      "failed": 24,
+      "devices": 1000,
+      "simulated_time": 60000000000
+    }
+  ]
+}

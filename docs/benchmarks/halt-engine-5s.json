@@ -1,0 +1,173 @@
+{
+  "machine": {
+    "os": "darwin",
+    "arch": "arm64",
+    "cpus": 14,
+    "model": "Apple M4 Pro",
+    "go": "go1.27.3",
+    "load_before": "1.65 2.34 2.67",
+    "load_after": "1.54 2.07 2.51"
+  },
+  "results": [
+    {
+      "trial": 1,
+      "tipped_at": "2026-11-05T18:27:58.654967-06:00",
+      "halted_at": "2026-11-05T18:28:02.193317-06:00",
+      "latency": 3538350000,
+      "reason": "stage_breach",
+      "installed": 20
+    },
+    {
+      "trial": 2,
+      "tipped_at": "2026-11-05T18:28:05.223692-06:00",
+      "halted_at": "2026-11-05T18:28:07.653295-06:00",
+      "latency": 2429603000,
+      "reason": "stage_breach",
+      "installed": 20
+    },
+    {
+      "trial": 3,
+      "tipped_at": "2026-11-05T18:28:11.555186-06:00",
+      "halted_at": "2026-11-05T18:28:13.179178-06:00",
+      "latency": 1623992000,
+      "reason": "stage_breach",
+      "installed": 20
+    },
+    {
+      "trial": 4,
+      "tipped_at": "2026-11-05T18:28:15.2931-06:00",
+      "halted_at": "2026-11-05T18:28:18.451444-06:00",
+      "latency": 3158344000,
+      "reason": "stage_breach",
+      "installed": 20
+    },
+    {
+      "trial": 5,
+      "tipped_at": "2026-11-05T18:28:21.941905-06:00",
+      "halted_at": "2026-11-05T18:28:24.108995-06:00",
+      "latency": 2167090000,
+      "reason": "stage_breach",
+      "installed": 20
+    },
+    {
+      "trial": 6,
+      "tipped_at": "2026-11-05T18:28:28.660301-06:00",
+      "halted_at": "2026-11-05T18:28:29.965136-06:00",
+      "latency": 1304835000,
+      "reason": "stage_breach",
+      "installed": 20
+    },
+    {
+      "trial": 7,
+      "tipped_at": "2026-11-05T18:28:35.169872-06:00",
+      "halted_at": "2026-11-05T18:28:35.65933-06:00",
+      "latency": 489458000,
+      "reason": "stage_breach",
+      "installed": 14
+    },
+    {
+      "trial": 8,
+      "tipped_at": "2026-11-05T18:28:40.843585-06:00",
+      "halted_at": "2026-11-05T18:28:41.150726-06:00",
+      "latency": 307141000,
+      "reason": "stage_breach",
+      "installed": 8
+    },
+    {
+      "trial": 9,
+      "tipped_at": "2026-11-05T18:28:42.149603-06:00",
+      "halted_at": "2026-11-05T18:28:46.799383-06:00",
+      "latency": 4649780000,
+      "reason": "stage_breach",
+      "installed": 20
+    },
+    {
+      "trial": 10,
+      "tipped_at": "2026-11-05T18:28:47.87376-06:00",
+      "halted_at": "2026-11-05T18:28:52.144537-06:00",
+      "latency": 4270777000,
+      "reason": "stage_breach",
+      "installed": 20
+    },
+    {
+      "trial": 11,
+      "tipped_at": "2026-11-05T18:28:55.354507-06:00",
+      "halted_at": "2026-11-05T18:28:57.81116-06:00",
+      "latency": 2456653000,
+      "reason": "stage_breach",
+      "installed": 20
+    },
+    {
+      "trial": 12,
+      "tipped_at": "2026-11-05T18:29:00.327502-06:00",
+      "halted_at": "2026-11-05T18:29:03.41409-06:00",
+      "latency": 3086588000,
+      "reason": "stage_breach",
+      "installed": 20
+    },
+    {
+      "trial": 13,
+      "tipped_at": "2026-11-05T18:29:07.668509-06:00",
+      "halted_at": "2026-11-05T18:29:09.387576-06:00",
+      "latency": 1719067000,
+      "reason": "stage_breach",
+      "installed": 20
+    },
+    {
+      "trial": 14,
+      "tipped_at": "2026-11-05T18:29:14.813829-06:00",
+      "halted_at": "2026-11-05T18:29:19.584658-06:00",
+      "latency": 4770829000,
+      "reason": "stage_breach",
+      "installed": 20
+    },
+    {
+      "trial": 15,
+      "tipped_at": "2026-11-05T18:29:21.514641-06:00",
+      "halted_at": "2026-11-05T18:29:25.689021-06:00",
+      "latency": 4174380000,
+      "reason": "stage_breach",
+      "installed": 20
+    },
+    {
+      "trial": 16,
+      "tipped_at": "2026-11-05T18:29:30.56565-06:00",
+      "halted_at": "2026-11-05T18:29:31.457955-06:00",
+      "latency": 892305000,
+      "reason": "stage_breach",
+      "installed": 20
+    },
+    {
+      "trial": 17,
+      "tipped_at": "2026-11-05T18:29:34.492157-06:00",
+      "halted_at": "2026-11-05T18:29:37.341513-06:00",
+      "latency": 2849356000,
+      "reason": "stage_breach",
+      "installed": 20
+    },
+    {
+      "trial": 18,
+      "tipped_at": "2026-11-05T18:29:43.13345-06:00",
+      "halted_at": "2026-11-05T18:29:43.428918-06:00",
+      "latency": 295468000,
+      "reason": "stage_breach",
+      "installed": 8
+    },
+    {
+      "trial": 19,
+      "tipped_at": "2026-11-05T18:29:49.058926-06:00",
+      "halted_at": "2026-11-05T18:29:49.119818-06:00",
+      "latency": 60892000,
+      "reason": "certain_breach",
+      "installed": 4
+    },
+    {
+      "trial": 20,
+      "tipped_at": "2026-11-05T18:29:50.421583-06:00",
+      "halted_at": "2026-11-05T18:29:54.857556-06:00",
+      "latency": 4435973000,
+      "reason": "stage_breach",
+      "installed": 20
+    }
+  ]
+}

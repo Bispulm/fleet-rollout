@@ -1,0 +1,145 @@
+{
+  "machine": {
+    "os": "darwin",
+    "arch": "arm64",
+    "cpus": 14,
+    "model": "Apple M4 Pro",
+    "go": "go1.27.3",
+    "load_before": "3.80 6.05 5.79",
+    "load_after": "5.50 7.09 6.37"
+  },
+  "results": [
+    {
+      "devices": 30000,
+      "state": "completed",
+      "timed_out": false,
+      "elapsed": 369075904500,
+      "routes": {
+        "GET /v1/device/artifacts/{id}/content": {
+          "count": 60000,
+          "unavailable": 0,
+          "errors": 0,
+          "p50": 1017083,
+          "p95": 1573000,
+          "p99": 2273125,
+          "max": 11190458
+        },
+        "GET /v1/device/artifacts/{id}/manifest": {
+          "count": 30000,
+          "unavailable": 0,
+          "errors": 0,
+          "p50": 979000,
+          "p95": 1535708,
+          "p99": 2241500,
+          "max": 9510875
+        },
+        "POST /v1/device/poll": {
+          "count": 184972,
+          "unavailable": 0,
+          "errors": 0,
+          "p50": 2207000,
+          "p95": 3863958,
+          "p99": 5108792,
+          "max": 46104708
+        },
+        "POST /v1/device/reports": {
+          "count": 150000,
+          "unavailable": 0,
+          "errors": 0,
+          "p50": 3119041,
+          "p95": 4861334,
+          "p99": 6151459,
+          "max": 31623125
+        }
+      },
+      "device_requests": 424972,
+      "requests_per_second": 1151.4487800977536,
+      "shed": 0,
+      "errors": 0,
+      "rolloutd": {
+        "cpu": 132482319000,
+        "elapsed": 371111440875,
+        "max_rss_mb": 40.703125
+      },
+      "simulator_cpu": 57132255000,
+      "simulator_peak_rss_mb": 973.234375,
+      "client_conns": 1024,
+      "postgres": {
+        "cpu_samples": 184,
+        "cpu_mean": 0.45940543478260865,
+        "cpu_peak": 1.3586,
+        "commits_per_second": 2547.69002401781,
+        "rows_written_per_second": 2045.831198389707,
+        "rows_read_per_second": 97788.91702208103,
+        "cache_hit_ratio": 0.9999986678778731
+      },
+      "pass": true
+    },
+    {
+      "devices": 60000,
+      "state": "completed",
+      "timed_out": false,
+      "elapsed": 453233105833,
+      "routes": {
+        "GET /v1/device/artifacts/{id}/content": {
+          "count": 119932,
+          "unavailable": 0,
+          "errors": 0,
+          "p50": 3797708,
+          "p95": 123373958,
+          "p99": 144346000,
+          "max": 250791792
+        },
+        "GET /v1/device/artifacts/{id}/manifest": {
+          "count": 66523,
+          "unavailable": 6557,
+          "errors": 0,
+          "p50": 4230667,
+          "p95": 122382875,
+          "p99": 143342708,
+          "max": 251729625
+        },
+        "POST /v1/device/poll": {
+          "count": 512588,
+          "unavailable": 64509,
+          "errors": 0,
+          "p50": 2628958,
+          "p95": 76265667,
+          "p99": 93560791,
+          "max": 211893625
+        },
+        "POST /v1/device/reports": {
+          "count": 351396,
+          "unavailable": 51633,
+          "errors": 0,
+          "p50": 6132834,
+          "p95": 86950875,
+          "p99": 104729083,
+          "max": 211510792
+        }
+      },
+      "device_requests": 1050439,
+      "requests_per_second": 2317.657263957785,
+      "shed": 122699,
+      "errors": 0,
+      "rolloutd": {
+        "cpu": 309166557000,
+        "elapsed": 456848238542,
+        "max_rss_mb": 63.921875
+      },
+      "simulator_cpu": 160301466000,
+      "simulator_peak_rss_mb": 1819.9375,
+      "client_conns": 1024,
+      "postgres": {
+        "cpu_samples": 225,
+        "cpu_mean": 0.8939848888888894,
+        "cpu_peak": 1.8868,
+        "commits_per_second": 4492.626363331607,
+        "rows_written_per_second": 3502.3390382804264,
+        "rows_read_per_second": 229104.87266625336,
+        "cache_hit_ratio": 0.9997642604500954
+      },
+      "pass": false
+    }
+  ]
+}
