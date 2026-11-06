@@ -2,8 +2,8 @@
 
 fleet-rollout has one server, `rolloutd`, that owns every decision, and clients that only ask it things:
 devices, the command line, and the Kubernetes operator. Postgres is the only durable state
-([ADR 0001](adr/0001-postgres-as-the-only-authority.md)). Everything here is built. What isn't is listed in
-the README's roadmap.
+([ADR 0001](adr/0001-postgres-as-the-only-authority.md)). Everything here is built. The README lists the
+limitations.
 
 ```mermaid
 flowchart LR
@@ -73,7 +73,9 @@ sequenceDiagram
     participant P as Postgres
     D->>A: poll
     A->>P: lock the device, issue an assignment if its stage is exposed
-    A-->>D: assignment and signed manifest
+    A-->>D: assignment
+    D->>A: GET manifest
+    A-->>D: signed manifest, checked against the device's trusted keys
     loop each chunk
         D->>A: GET content, Range
         A-->>D: bytes
@@ -157,8 +159,9 @@ sequenceDiagram
 ```
 
 Because outcomes are read from assignments each time, there are no counters to drift or to lose in a
-crash, and a duplicate report has nothing to double count. `rolloutctl rollout status` runs the same
-`Evaluate` to explain what a rollout is waiting for, so the explanation can't disagree with the decision.
+crash, and a duplicate report has nothing to double count. rolloutd runs the same `Evaluate` to say what a
+rollout is waiting for, which `rolloutctl rollout status` shows, so the explanation can't disagree with the
+decision.
 
 A halt stops new exposure and cancels work that hasn't reached installation, in the same transaction. With
 `on_breach: rollback`, the same transaction starts a rollback too: every device that updated gets a rollback
