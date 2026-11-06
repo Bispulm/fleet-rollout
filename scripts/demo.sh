@@ -119,9 +119,12 @@ ROLLOUT="$(create good-2-0-0 "$GOOD")"
 say "Rolling out release 3, which fails on 30% of devices, with rollback on breach"
 ROLLOUT="$(create bad-3-0-0 "$BAD" --on-breach rollback)"
 "$BIN/rolloutctl" rollout start "$ROLLOUT" >/dev/null
-# The watch fails because the rollout doesn't complete, which is the point here. Its status says why.
+# The watch fails because the rollout doesn't complete, which is the point here. Its status says why, and the
+# check after it makes sure it ended the way it should, not some other way.
 "$BIN/rolloutctl" rollout status "$ROLLOUT" --watch --interval 2s 2>/dev/null |
   grep -E '^[0-9]{2}:|^(Halted|Failures|Rollback):|^STAGE|^[1-4] ' || true
+STATE="$("$BIN/rolloutctl" rollout status "$ROLLOUT" -o json | sed -n 's/^  "state": "\(.*\)",$/\1/p')"
+[ "$STATE" = rolled_back ] || fail "the bad release ended ${STATE:-unknown}, not rolled_back"
 
 say "Waiting for the fleet to settle, then stopping it"
 sleep 20
