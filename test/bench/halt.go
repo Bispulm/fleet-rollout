@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"os"
 	"strconv"
 	"time"
@@ -64,7 +65,7 @@ func runHalt(ctx context.Context, args []string, getenv func(string) string, std
 	}
 	var results []haltResult
 	for trial := range *trials {
-		r, err := haltTrial(ctx, *binary, serverURL, dir, env, *seed+int64(trial), *devices)
+		r, err := haltTrial(ctx, *binary, serverURL, dir, env, *seed+int64(trial), *devices, *engineInterval)
 		if err != nil {
 			return fmt.Errorf("trial %d: %w", trial+1, err)
 		}
@@ -97,12 +98,23 @@ func runHalt(ctx context.Context, args []string, getenv func(string) string, std
 	}{m, results})
 }
 
-func haltTrial(ctx context.Context, binary, databaseServer, dir string, env map[string]string, seed int64, devices int) (haltResult, error) {
+func haltTrial(ctx context.Context, binary, databaseServer, dir string, env map[string]string, seed int64, devices int,
+	engineInterval time.Duration,
+) (haltResult, error) {
 	srv, err := startServer(ctx, binary, databaseServer, dir, env)
 	if err != nil {
 		return haltResult{}, err
 	}
 	defer func() { _ = srv.cleanUp() }()
+	// The engine ticks on a schedule that starts with rolloutd, and setting a rollout up takes
+	// about the same time every trial, so without this every breach would land at the same
+	// point between ticks. Waiting a random part of an interval spreads them over it.
+	rng := rand.New(rand.NewPCG(uint64(seed), 0x4a17)) //nolint:gosec // Spreading start times, not security.
+	select {
+	case <-ctx.Done():
+		return haltResult{}, ctx.Err()
+	case <-time.After(time.Duration(rng.Int64N(int64(engineInterval)))):
+	}
 	stage := func(percent int) rollout.StageSpec {
 		return rollout.StageSpec{Percent: percent, Soak: durationPtr(time.Minute), Deadline: durationPtr(time.Hour), MinObservations: new(5)}
 	}
