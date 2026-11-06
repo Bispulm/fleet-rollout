@@ -174,6 +174,8 @@ func (d *device) step(ctx context.Context) time.Duration {
 		d.agent = a
 	}
 	d.steps++
+	// Only a failure in this step counts, not one left over from a step that crashed.
+	d.chunkFailed = false
 	var wait time.Duration
 	var err error
 	if crashed := survive(func() { wait, err = d.agent.Step(ctx) }); crashed {
