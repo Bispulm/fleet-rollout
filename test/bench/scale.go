@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -50,7 +51,8 @@ type scaleResult struct {
 }
 
 type postgresLoad struct {
-	// CPU is in cores, from docker stats on the Postgres container.
+	// CPU is in cores, from docker stats on the Postgres container, if it could be read.
+	CPUSamples        int     `json:"cpu_samples"`
 	CPUMean           float64 `json:"cpu_mean"`
 	CPUPeak           float64 `json:"cpu_peak"`
 	CommitsPerSec     float64 `json:"commits_per_second"`
@@ -76,6 +78,8 @@ func runScale(ctx context.Context, args []string, getenv func(string) string, st
 	startWithin := flags.Duration("start-within", 0, "spread the devices' first requests over this long (default: the poll interval, "+
 		"a fleet in its steady state); a short spread is a fleet reconnecting all at once")
 	out := flags.String("json", "", "also write the results to this file as JSON")
+	logDir := flags.String("log-dir", "", "keep rolloutd's log from each size in this directory")
+	settings := flags.String("rolloutd-env", "", "extra rolloutd settings, as comma-separated KEY=VALUE pairs")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -98,11 +102,25 @@ func runScale(ctx context.Context, args []string, getenv func(string) string, st
 
 	m := describeMachine()
 	env := map[string]string{"ROLLOUTD_POLL_INTERVAL": pollInterval.String()}
+	if *settings != "" {
+		for pair := range strings.SplitSeq(*settings, ",") {
+			key, value, ok := strings.Cut(pair, "=")
+			if !ok || !strings.HasPrefix(key, "ROLLOUTD_") {
+				return fmt.Errorf("--rolloutd-env: %q isn't ROLLOUTD_NAME=value", pair)
+			}
+			env[key] = value
+		}
+	}
 	var results []scaleResult
 	for _, devices := range fleetSizes {
 		r, err := scaleRun(ctx, *binary, serverURL, dir, env, *container, devices, *soak, *conns, *startWithin)
 		if err != nil {
 			return fmt.Errorf("%d devices: %w", devices, err)
+		}
+		if *logDir != "" {
+			if err := copyFile(filepath.Join(dir, "rolloutd.log"), filepath.Join(*logDir, fmt.Sprintf("rolloutd-%d.log", devices))); err != nil {
+				return err
+			}
 		}
 		r.Pass = r.State == rollout.StateCompleted && !r.TimedOut && r.Shed == 0 && r.Errors == 0
 		for _, route := range deviceRoutes {
@@ -122,6 +140,9 @@ func runScale(ctx context.Context, args []string, getenv func(string) string, st
 	_, _ = fmt.Fprintf(stdout, "Scale: a staged rollout (10%%, 25%%, 50%%, 100%%, %s soaks) on live simulated fleets, devices "+
 		"polling every %s over %d shared connections, first requests spread over %s, rolloutd with default settings, "+
 		"everything on one machine.\n", *soak, *pollInterval, *conns, *startWithin)
+	if *settings != "" {
+		_, _ = fmt.Fprintf(stdout, "rolloutd settings changed from the defaults: %s.\n", *settings)
+	}
 	printMachine(stdout, m)
 	_, _ = fmt.Fprintln(stdout)
 	rows := make([][]string, 0, len(results))
@@ -131,7 +152,7 @@ func runScale(ctx context.Context, args []string, getenv func(string) string, st
 			strconv.Itoa(r.Devices), strconv.FormatFloat(r.RequestsPerSec, 'f', 0, 64),
 			latencies(poll), latencies(report), strconv.Itoa(r.Shed),
 			fmt.Sprintf("%.2f", r.Rolloutd.CPU.Seconds()/r.Rolloutd.Elapsed.Seconds()), fmt.Sprintf("%.0f", r.Rolloutd.MaxRSSMB),
-			fmt.Sprintf("%.2f / %.2f", r.Postgres.CPUMean, r.Postgres.CPUPeak), fmt.Sprintf("%.0f", r.Postgres.CommitsPerSec),
+			postgresCPU(r.Postgres), fmt.Sprintf("%.0f", r.Postgres.CommitsPerSec),
 			fmt.Sprintf("%.2f", r.SimulatorCPU.Seconds()/r.Elapsed.Seconds()),
 			fmt.Sprintf("%s in %s", r.State, r.Elapsed.Round(time.Second)),
 		})
@@ -153,6 +174,21 @@ func runScale(ctx context.Context, args []string, getenv func(string) string, st
 		Machine machine       `json:"machine"`
 		Results []scaleResult `json:"results"`
 	}{m, results})
+}
+
+func copyFile(from, to string) error {
+	data, err := os.ReadFile(from) //nolint:gosec // The benchmark's own log.
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(to, data, 0o600) //nolint:gosec // The directory the person running the benchmark named.
+}
+
+func postgresCPU(p postgresLoad) string {
+	if p.CPUSamples == 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%.2f / %.2f", p.CPUMean, p.CPUPeak)
 }
 
 func latencies(stats *routeStats) string {
@@ -192,7 +228,7 @@ func scaleRun(ctx context.Context, binary, databaseServer, dir string, env map[s
 		APIURL: srv.URL, AdminToken: srv.Token, Signer: srv.Signer, Trust: srv.Trust, MaxConns: conns,
 		StartWithin: startWithin,
 	})
-	cpuMean, cpuPeak := sampler.stop()
+	cpuMean, cpuPeak, cpuSamples := sampler.stop()
 	simulatorCPU := selfCPU() - cpuBefore
 	if err != nil {
 		_, _ = srv.stop()
@@ -227,7 +263,7 @@ func scaleRun(ctx context.Context, binary, databaseServer, dir string, env map[s
 	seconds := report.Elapsed.Seconds()
 	r.RequestsPerSec = float64(r.DeviceRequests) / seconds
 	r.Postgres = postgresLoad{
-		CPUMean: cpuMean, CPUPeak: cpuPeak,
+		CPUSamples: cpuSamples, CPUMean: cpuMean, CPUPeak: cpuPeak,
 		CommitsPerSec:     float64(after.commits-before.commits) / seconds,
 		RowsWrittenPerSec: float64(after.written-before.written) / seconds,
 		RowsReadPerSec:    float64(after.read-before.read) / seconds,
@@ -307,19 +343,19 @@ func startCPUSampler(ctx context.Context, container string) *cpuSampler {
 	return s
 }
 
-// stop returns the mean and peak CPU use, in cores.
-func (s *cpuSampler) stop() (mean, peak float64) {
+// stop returns the mean and peak CPU use, in cores, and how many samples they're from.
+func (s *cpuSampler) stop() (mean, peak float64, samples int) {
 	s.cancel()
 	<-s.done
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.samples) == 0 {
-		return 0, 0
+		return 0, 0, 0
 	}
 	var sum float64
 	for _, v := range s.samples {
 		sum += v
 		peak = max(peak, v)
 	}
-	return sum / float64(len(s.samples)), peak
+	return sum / float64(len(s.samples)), peak, len(s.samples)
 }
