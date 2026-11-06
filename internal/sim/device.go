@@ -278,10 +278,33 @@ func (f faultyInstaller) HealthCheck(ctx context.Context, slot string) error {
 	if err := f.MemoryInstaller.HealthCheck(ctx, slot); err != nil {
 		return err
 	}
-	if f.device.unhealthy {
+	if f.device.unhealthy && f.device.isBadRelease(slot) {
 		return errors.New("simulated: the release fails on this device")
 	}
 	return nil
+}
+
+// isBadRelease reports whether the release in slot is the one that's unhealthy, which is every
+// release unless Faults.UnhealthyRelease names one.
+func (d *device) isBadRelease(slot string) bool {
+	bad := d.env.faults.UnhealthyRelease
+	if bad == 0 {
+		return true
+	}
+	cp, _, err := d.checkpoints.Load()
+	if err != nil {
+		return true
+	}
+	// A forward install checks the release it's installing. A rollback checks the release
+	// it's going back to, in the previous slot.
+	var release int64
+	switch {
+	case cp.Work != nil && cp.Work.Kind != agent.KindRollback && cp.Work.PendingSlot == slot:
+		release = cp.Work.Artifact.ReleaseCounter
+	case cp.Previous != nil:
+		release = cp.Previous.Release
+	}
+	return release == bad
 }
 
 // faultTransport injects network faults into a device's requests.

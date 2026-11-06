@@ -261,6 +261,7 @@ func runFleet(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	seed := flags.Int64("seed", 1, "seed for every fault decision")
 	dropRate := flags.Float64("drop-rate", -1, "share of device requests that fail before reaching the server (default: the preset's)")
 	badRate := flags.Float64("bad-release-rate", -1, "share of devices on which releases fail their health check (default: the preset's)")
+	badRelease := flags.Int64("bad-release", 0, "the one release counter that fails on those devices; others pass (default: every release)")
 	duration := flags.Duration("duration", 0, "stop after this long (default: run until interrupted)")
 	asJSON := flags.Bool("json", false, "print the report as JSON")
 	if err := flags.Parse(args); err != nil {
@@ -273,6 +274,10 @@ func runFleet(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	if err != nil {
 		return err
 	}
+	if *badRelease < 0 {
+		return errors.New("--bad-release must be a release counter")
+	}
+	faults.UnhealthyRelease = *badRelease
 	for _, rate := range []struct {
 		name  string
 		value float64

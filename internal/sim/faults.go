@@ -37,6 +37,9 @@ type Faults struct {
 	RestartWithin time.Duration `json:"restart_within"`
 	// Unhealthy is the share of devices on which the release fails its health check.
 	Unhealthy float64 `json:"unhealthy"`
+	// UnhealthyRelease, if set, is the one release that's unhealthy on those devices. Every
+	// other release passes, so that one fleet can take a good release and then a bad one.
+	UnhealthyRelease int64 `json:"unhealthy_release,omitempty"`
 	// Offline is the share of devices that drop off the network once, for OfflineFor,
 	// starting somewhere in the first OfflineWithin of the run.
 	Offline       float64       `json:"offline"`
