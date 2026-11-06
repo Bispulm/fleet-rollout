@@ -29,6 +29,30 @@ test-integration: ## Run all tests with the race detector against local Postgres
 test-kind: ## Run rollouts end to end on a local kind cluster (deletes it after unless KEEP_CLUSTER=1)
 	test/kind/run.sh
 
+.PHONY: demo
+demo: ## Roll a good and then a bad release out to 10,000 simulated devices (DEVICES=n to change)
+	scripts/demo.sh
+
+# Benchmarks create scratch databases on the local Postgres. Pass flags with ARGS, for example
+# make bench-scale ARGS='--devices 1000,5000'. docs/benchmarks.md has the results.
+BENCH = ROLLOUT_BENCH_DATABASE_URL='$(TEST_DATABASE_URL)' go run ./test/bench
+
+.PHONY: bench-resume
+bench-resume: ## Measure the bytes resumable downloads save
+	$(BENCH) resume $(ARGS)
+
+.PHONY: bench-staging
+bench-staging: ## Measure how many devices a bad release reaches, staged and not
+	$(BENCH) staging $(ARGS)
+
+.PHONY: bench-halt
+bench-halt: build ## Measure the time from a breach to the halt, against real rolloutd
+	$(BENCH) halt $(ARGS)
+
+.PHONY: bench-scale
+bench-scale: build ## Measure latency and load at growing fleet sizes, against real rolloutd
+	$(BENCH) scale $(ARGS)
+
 .PHONY: lint
 lint: ## Run golangci-lint
 	golangci-lint run ./...

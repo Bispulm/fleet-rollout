@@ -1,0 +1,79 @@
+{
+  "machine": {
+    "os": "darwin",
+    "arch": "arm64",
+    "cpus": 14,
+    "model": "Apple M4 Pro",
+    "go": "go1.27.3",
+    "load_before": "3.48 3.86 4.48",
+    "load_after": "5.57 4.54 4.63"
+  },
+  "results": [
+    {
+      "devices": 10000,
+      "state": "completed",
+      "timed_out": false,
+      "elapsed": 180029527875,
+      "routes": {
+        "GET /v1/device/artifacts/{id}/content": {
+          "count": 20000,
+          "unavailable": 0,
+          "errors": 0,
+          "p50": 1833542,
+          "p95": 51896750,
+          "p99": 61737167,
+          "max": 81439750
+        },
+        "GET /v1/device/artifacts/{id}/manifest": {
+          "count": 10000,
+          "unavailable": 0,
+          "errors": 0,
+          "p50": 1799042,
+          "p95": 52456292,
+          "p99": 61586708,
+          "max": 79841041
+        },
+        "POST /v1/device/poll": {
+          "count": 180044,
+          "unavailable": 0,
+          "errors": 0,
+          "p50": 2596709,
+          "p95": 6689375,
+          "p99": 41741625,
+          "max": 196416292
+        },
+        "POST /v1/device/reports": {
+          "count": 50000,
+          "unavailable": 0,
+          "errors": 0,
+          "p50": 5822375,
+          "p95": 49375916,
+          "p99": 58575708,
+          "max": 84481792
+        }
+      },
+      "device_requests": 260044,
+      "requests_per_second": 1444.451935576682,
+      "shed": 0,
+      "errors": 0,
+      "rolloutd": {
+        "cpu": 79843060000,
+        "elapsed": 180959306292,
+        "max_rss_mb": 68.453125
+      },
+      "simulator_cpu": 32207145000,
+      "simulator_peak_rss_mb": 406.9375,
+      "client_conns": 1024,
+      "postgres": {
+        "cpu_samples": 89,
+        "cpu_mean": 0.5560011235955058,
+        "cpu_peak": 2.2163999999999997,
+        "commits_per_second": 3048.1944072031574,
+        "rows_written_per_second": 2050.596945720619,
+        "rows_read_per_second": 42653.064142520176,
+        "cache_hit_ratio": 0.9999971819994797
+      },
+      "pass": true
+    }
+  ]
+}

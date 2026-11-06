@@ -10,22 +10,17 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"os/signal"
 	"slices"
 	"strings"
 	"syscall"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 
 	"github.com/Bispulm/fleet-rollout/internal/db"
 	"github.com/Bispulm/fleet-rollout/internal/rollout"
@@ -36,7 +31,6 @@ import (
 const (
 	databaseEnv   = "ROLLOUT_SIM_DATABASE_URL"
 	adminTokenEnv = "ROLLOUT_ADMIN_TOKEN" //nolint:gosec // The name of a variable, not a credential.
-	setupTimeout  = 30 * time.Second
 )
 
 func main() {
@@ -181,11 +175,15 @@ func runDeterministic(ctx context.Context, args []string, getenv func(string) st
 		return err
 	}
 
-	scratchURL, drop, err := createScratch(ctx, *serverURL)
+	scratchURL, drop, err := db.CreateScratch(ctx, *serverURL, "rollout_sim_")
 	if err != nil {
 		return err
 	}
-	defer drop()
+	defer func() {
+		if err := drop(); err != nil {
+			_, _ = fmt.Fprintf(stderr, "rollout-sim: couldn't %v\n", err)
+		}
+	}()
 	pool, err := db.Open(ctx, scratchURL, 4)
 	if err != nil {
 		return fmt.Errorf("open scratch database: %w", err)
@@ -199,45 +197,6 @@ func runDeterministic(ctx context.Context, args []string, getenv func(string) st
 		return err
 	}
 	return printReport(stdout, report, *c.asJSON)
-}
-
-// createScratch creates an empty database and returns its URL, and a function that drops it.
-func createScratch(ctx context.Context, serverURL string) (string, func(), error) {
-	suffix := make([]byte, 8)
-	_, _ = rand.Read(suffix)
-	name := "rollout_sim_" + hex.EncodeToString(suffix)
-	parsed, err := url.Parse(serverURL)
-	if err != nil {
-		return "", nil, fmt.Errorf("parse database URL: %w", err)
-	}
-
-	setup, cancel := context.WithTimeout(ctx, setupTimeout)
-	defer cancel()
-	admin, err := pgx.Connect(setup, serverURL)
-	if err != nil {
-		return "", nil, fmt.Errorf("connect to database server: %w", err)
-	}
-	defer func() { _ = admin.Close(context.WithoutCancel(setup)) }()
-	if _, err := admin.Exec(setup, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()); err != nil {
-		return "", nil, fmt.Errorf("create scratch database: %w", err)
-	}
-
-	drop := func() {
-		// This runs even when the run was interrupted, so it gets a context of its own.
-		ctx, cancel := context.WithTimeout(context.Background(), setupTimeout)
-		defer cancel()
-		admin, err := pgx.Connect(ctx, serverURL)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "rollout-sim: couldn't drop scratch database %s: %v\n", name, err)
-			return
-		}
-		defer func() { _ = admin.Close(ctx) }()
-		if _, err := admin.Exec(ctx, "DROP DATABASE "+pgx.Identifier{name}.Sanitize()+" WITH (FORCE)"); err != nil {
-			fmt.Fprintf(os.Stderr, "rollout-sim: couldn't drop scratch database %s: %v\n", name, err)
-		}
-	}
-	parsed.Path = "/" + name
-	return parsed.String(), drop, nil
 }
 
 func runLive(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) error {
@@ -302,6 +261,7 @@ func runFleet(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	seed := flags.Int64("seed", 1, "seed for every fault decision")
 	dropRate := flags.Float64("drop-rate", -1, "share of device requests that fail before reaching the server (default: the preset's)")
 	badRate := flags.Float64("bad-release-rate", -1, "share of devices on which releases fail their health check (default: the preset's)")
+	badRelease := flags.Int64("bad-release", 0, "the one release counter that fails on those devices; others pass (default: every release)")
 	duration := flags.Duration("duration", 0, "stop after this long (default: run until interrupted)")
 	asJSON := flags.Bool("json", false, "print the report as JSON")
 	if err := flags.Parse(args); err != nil {
@@ -314,6 +274,10 @@ func runFleet(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	if err != nil {
 		return err
 	}
+	if *badRelease < 0 {
+		return errors.New("--bad-release must be a release counter")
+	}
+	faults.UnhealthyRelease = *badRelease
 	for _, rate := range []struct {
 		name  string
 		value float64

@@ -38,6 +38,14 @@ func TestArgumentsAreChecked(t *testing.T) {
 	}
 }
 
+func TestABadReleaseMustBeAReleaseCounter(t *testing.T) {
+	err := run(t.Context(), []string{"fleet", "--tokens-file", "tokens.txt", "--trust-keys", "release.pub", "--bad-release", "-1"},
+		func(string) string { return "" }, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "--bad-release") {
+		t.Fatalf("err = %v, want one about --bad-release", err)
+	}
+}
+
 func TestADeterministicRunPrintsItsReport(t *testing.T) {
 	serverURL := os.Getenv("ROLLOUT_TEST_DATABASE_URL")
 	if serverURL == "" {

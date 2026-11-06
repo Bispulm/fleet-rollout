@@ -25,6 +25,10 @@ type Faults struct {
 	Corrupt float64 `json:"corrupt"`
 	// Truncate cuts a download off partway through.
 	Truncate float64 `json:"truncate"`
+	// Break cuts a download off at a random point anywhere in the response, as a connection
+	// dropping mid-transfer would. Unlike Truncate, which cuts within the first kilobyte, it
+	// can lose most of a chunk.
+	Break float64 `json:"break,omitempty"`
 	// DuplicateReport delivers a report twice.
 	DuplicateReport float64 `json:"duplicate_report"`
 	// Crash kills the agent at a durable-state or install boundary. It restarts from what
@@ -33,6 +37,9 @@ type Faults struct {
 	RestartWithin time.Duration `json:"restart_within"`
 	// Unhealthy is the share of devices on which the release fails its health check.
 	Unhealthy float64 `json:"unhealthy"`
+	// UnhealthyRelease, if set, is the one release that's unhealthy on those devices. Every
+	// other release passes, so that one fleet can take a good release and then a bad one.
+	UnhealthyRelease int64 `json:"unhealthy_release,omitempty"`
 	// Offline is the share of devices that drop off the network once, for OfflineFor,
 	// starting somewhere in the first OfflineWithin of the run.
 	Offline       float64       `json:"offline"`

@@ -1,0 +1,75 @@
+# Release builds of every binary, for Linux and macOS. The release workflow runs this on version
+# tags. `goreleaser release --snapshot --clean` builds the same thing locally, into dist/.
+version: 2
+
+project_name: fleet-rollout
+
+before:
+  hooks:
+    - go mod verify
+
+builds:
+  - &binary
+    id: rolloutd
+    main: ./cmd/rolloutd
+    binary: rolloutd
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    # Builds of one commit are byte for byte the same.
+    mod_timestamp: "{{ .CommitTimestamp }}"
+  - <<: *binary
+    id: rolloutctl
+    main: ./cmd/rolloutctl
+    binary: rolloutctl
+  - <<: *binary
+    id: rollout-agent
+    main: ./cmd/rollout-agent
+    binary: rollout-agent
+  - <<: *binary
+    id: rollout-operator
+    main: ./cmd/rollout-operator
+    binary: rollout-operator
+  - <<: *binary
+    id: rollout-sim
+    main: ./cmd/rollout-sim
+    binary: rollout-sim
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: git
+  sort: asc
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      order: 0
+    - title: Fixes
+      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      order: 1
+    - title: Other changes
+      order: 999
+  filters:
+    exclude:
+      - "^docs"
+      - "^test"
+      - "^chore"
+      - "^Merge branch"
+
+release:
+  # A person reads the notes and publishes it.
+  draft: true
+  prerelease: auto

@@ -1,0 +1,48 @@
+{
+  "machine": {
+    "os": "darwin",
+    "arch": "arm64",
+    "cpus": 14,
+    "model": "Apple M4 Pro",
+    "go": "go1.27.3",
+    "load_before": "4.47 3.12 2.96",
+    "load_after": "4.17 3.17 2.99"
+  },
+  "results": [
+    {
+      "break_rate": 0,
+      "breaks": 0,
+      "resumed_bytes_per_device": 1048576,
+      "restarted_bytes_per_device": 1048576,
+      "artifact_bytes": 1048576
+    },
+    {
+      "break_rate": 0.01,
+      "breaks": 17,
+      "resumed_bytes_per_device": 1054320.9,
+      "restarted_bytes_per_device": 1136386.5,
+      "artifact_bytes": 1048576
+    },
+    {
+      "break_rate": 0.05,
+      "breaks": 79,
+      "resumed_bytes_per_device": 1074143.54,
+      "restarted_bytes_per_device": 1490944.6,
+      "artifact_bytes": 1048576
+    },
+    {
+      "break_rate": 0.1,
+      "breaks": 159,
+      "resumed_bytes_per_device": 1099758.89,
+      "restarted_bytes_per_device": 2259521.63,
+      "artifact_bytes": 1048576
+    },
+    {
+      "break_rate": 0.2,
+      "breaks": 392,
+      "resumed_bytes_per_device": 1170347.45,
+      "restarted_bytes_per_device": 8928357.69,
+      "artifact_bytes": 1048576
+    }
+  ]
+}

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Bispulm/fleet-rollout/internal/db"
@@ -164,5 +165,30 @@ func TestSchemaRejectsInvalidFleetAndDeviceRows(t *testing.T) {
 				t.Fatalf("SQLSTATE = %s (%s), want %s", pgErr.Code, pgErr.ConstraintName, tc.wantCode)
 			}
 		})
+	}
+}
+
+func TestScratchDatabasesAreCreatedEmptyAndDropped(t *testing.T) {
+	ctx := testContext(t)
+	server := testdb.ServerURL(t)
+	scratch, drop, err := db.CreateScratch(ctx, server, "rollout_scratch_test_")
+	if err != nil {
+		t.Fatalf("CreateScratch: %v", err)
+	}
+	pool, err := db.Open(ctx, scratch, 2)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, err := db.Migrate(ctx, pool); err != nil {
+		t.Fatalf("migrate the scratch database: %v", err)
+	}
+	pool.Close()
+	if err := drop(); err != nil {
+		t.Fatalf("drop: %v", err)
+	}
+	conn, err := pgx.Connect(ctx, scratch)
+	if err == nil {
+		_ = conn.Close(ctx)
+		t.Fatal("the scratch database is still there after it was dropped")
 	}
 }

@@ -4,15 +4,108 @@ A control plane for staging software updates across a fleet of unreliable device
 It exposes each update to a growing share of the fleet, watches what happens, and stops before a
 bad release reaches everyone.
 
-**Status: early development.** The control plane and the devices work. The control plane issues
-assignments to devices that poll, takes their reports, advances stages, and halts a rollout that crosses a
-safety threshold. The device agent downloads signed artifacts in resumable chunks, asks before it installs,
-and reverts a release that fails its health check. A simulator runs fleets of the real agent with faults
-injected around it. On Kubernetes, an operator turns `Rollout` resources into rollouts. A rollout that
-breaches can roll back, restoring what each device ran before. Metrics, traces, and a dashboard show it happen. See [what works](#what-works-today)
-and the [roadmap](#roadmap).
+The control plane issues assignments to devices that poll, takes their reports, advances stages, and halts
+a rollout that crosses a safety threshold. The device agent downloads signed artifacts in resumable chunks,
+asks before it installs, and reverts a release that fails its health check. A rollout that breaches can roll
+back, restoring what each device ran before. A simulator runs fleets of the real agent with faults injected
+around it. On Kubernetes, an operator turns `Rollout` resources into rollouts. Metrics, traces, and a
+dashboard show it all happen. See [what works](#what-works-today), the [benchmarks](#benchmarks), and the
+[limitations](#limitations).
 
-All devices are simulated. This isn't meant to run on real hardware.
+All devices are simulated. This is a portfolio project, not meant to run on real hardware.
+
+```mermaid
+flowchart LR
+    CLI[rolloutctl] --> API
+    CR[Rollout resources] --> OP[rollout-operator] --> API
+    AGENT[rollout-agent on each device] -->|poll, download, report| API
+    subgraph rolloutd
+        API[HTTP API] --> STORE[store]
+        ENG[engine] --> STORE
+    end
+    STORE --> DB[(Postgres)]
+    rolloutd --> OBS[Prometheus, Grafana, Jaeger]
+```
+
+Postgres holds all state, and any number of rolloutd instances can serve devices, while one at a time runs the
+engine. [docs/architecture.md](docs/architecture.md) explains how the pieces fit together.
+
+## Demo
+
+You need Go, Docker with Compose, `make`, and `openssl`. From the repository root:
+
+```bash
+make demo
+```
+
+It starts Postgres and rolloutd, registers 10,000 simulated devices, and runs each one as the real agent on a
+flaky network: dropped and lost requests, corrupted and cut-off downloads, crashes, and devices going offline. Then
+it rolls out a good release through stages of 1%, 10%, 50%, and 100%, and after that a release that fails on 30% of
+devices, with rollback on breach. It took under 4 minutes on the machine in [docs/benchmarks.md](docs/benchmarks.md).
+This is its output from one run, trimmed where a stage only counted up:
+
+```text
+==> Registering 10000 devices, each running release 1
+
+==> Starting the fleet: real agents, with dropped and lost requests, corrupted downloads, crashes, and outages
+
+==> Rolling out release 2: four stages, 30s soaks, halting above 5% failures once a stage has 90 outcomes
+20:06:31  running  stage 1 of 4: 0 ok, 0 failed, 0 in flight, 100 pending  waiting: coverage: 0 of 100 devices have an outcome, need 90
+...
+20:06:41  soaking  stage 1 of 4: 93 ok, 1 failed, 1 in flight, 6 pending  waiting: soak: 0s of 30s
+...
+20:07:16  running  stage 2 of 4: 35 ok, 0 failed, 9 in flight, 865 pending  waiting: coverage: 35 of 900 devices have an outcome, need 810
+...
+20:07:31  soaking  stage 2 of 4: 866 ok, 4 failed, 0 in flight, 30 pending  waiting: soak: 0s of 30s
+...
+20:08:01  running  stage 3 of 4: 178 ok, 0 failed, 39 in flight, 3822 pending  waiting: coverage: 178 of 4000 devices have an outcome, need 3600
+...
+20:08:16  soaking  stage 3 of 4: 3830 ok, 28 failed, 2 in flight, 142 pending  waiting: soak: 0s of 30s
+...
+20:08:46  running  stage 4 of 4: 236 ok, 0 failed, 50 in flight, 4764 pending  waiting: coverage: 236 of 5000 devices have an outcome, need 4500
+...
+20:09:01  soaking  stage 4 of 4: 4941 ok, 30 failed, 5 in flight, 29 pending  waiting: soak: 1s of 30s
+...
+20:09:31  completed  stage 4 of 4: 4964 ok, 30 failed, 0 in flight, 3 pending
+STAGE  PERCENT  TARGET  NEW   MIN OBS  SOAK  STATE   OK    FAILED  IN FLIGHT  PENDING  UNKNOWN  DEADLINE
+1      1%       100     100   90       30s   passed  99    1       0          0        0        2026-11-05 21:06:30-06:00
+2      10%      1000    900   90       30s   passed  896   4       0          0        0        2026-11-05 21:07:15-06:00
+3      50%      5000    4000  90       30s   passed  3967  28      0          2        0        2026-11-05 21:08:00-06:00
+4      100%     10000   5000  90       30s   passed  4964  30      0          3        0        2026-11-05 21:08:45-06:00
+
+==> Rolling out release 3, which fails on 30% of devices, with rollback on breach
+20:09:32  running  stage 1 of 4: 0 ok, 0 failed, 0 in flight, 100 pending  waiting: coverage: 0 of 100 devices have an outcome, need 90
+20:09:34  running  stage 1 of 4: 8 ok, 2 failed, 1 in flight, 90 pending  waiting: coverage: 10 of 100 devices have an outcome, need 90
+20:09:36  rolling_back  stage 1 of 4: 15 ok, 6 failed, 0 in flight, 76 pending  rollback: 0 of 15 restored, 0 failed  waiting: rollback: 0 of 15 devices restored
+20:09:42  rolling_back  stage 1 of 4: 15 ok, 6 failed, 0 in flight, 76 pending  rollback: 2 of 15 restored, 0 failed  waiting: rollback: 2 of 15 devices restored
+20:09:44  rolling_back  stage 1 of 4: 15 ok, 6 failed, 0 in flight, 76 pending  rollback: 8 of 15 restored, 0 failed  waiting: rollback: 8 of 15 devices restored
+20:09:46  rolling_back  stage 1 of 4: 15 ok, 6 failed, 0 in flight, 76 pending  rollback: 13 of 15 restored, 0 failed  waiting: rollback: 13 of 15 devices restored
+20:09:48  rolling_back  stage 1 of 4: 15 ok, 6 failed, 0 in flight, 76 pending  rollback: 15 of 15 restored, 0 failed  waiting: rollback: 15 of 15 devices restored
+20:09:52  rolled_back  stage 1 of 4: 15 ok, 6 failed, 0 in flight, 76 pending  rollback: 15 of 15 restored, 0 failed
+Halted:         certain_breach: stage 1: 6 failed of 20 outcomes, in a cohort of 100, above the 5.00% limit
+Failures:       unhealthy 6
+Rollback:       attempt 1: 15 of 15 devices restored, 0 failed, 0 unresolved
+STAGE  PERCENT  TARGET  NEW   MIN OBS  SOAK  STATE    OK  FAILED  IN FLIGHT  PENDING  UNKNOWN  DEADLINE
+1      1%       100     100   90       30s   failed   15  6       0          76       0        2026-11-05 21:09:31-06:00
+2      10%      1000    900   90       30s   pending  0   0       0          0        0        -
+3      50%      5000    4000  90       30s   pending  0   0       0          0        0        -
+4      100%     10000   5000  90       30s   pending  0   0       0          0        0        -
+
+==> Waiting for the fleet to settle, then stopping it
+10000 devices after 3m41s: release 1 74, release 2 9926
+failures: interrupted 63, unhealthy 6
+faults injected: corrupt 336, crash 300, drop 15896, duplicate_report 2650, lost_response 15392, offline_refusal 5266, truncate 312; agent crashes 300
+```
+
+The good release passed every stage while the network dropped about 16,000 requests and lost 15,000 responses, and
+300 agents crashed. The 63 devices that crashed mid-install reverted and count as failures, at most 1% of any stage.
+The bad release failed on 6 of the first 20 devices to report, already more than 5% of the first stage's 100
+devices, so the rollout halted without waiting for more. 21 devices of 10,000 had installed it, and the 15 where it
+passed its health check went back to release 2. Everything else is on release 2, apart from the 63 interrupted
+devices and 11 the first rollout completed without.
+
+`DEVICES=1000 make demo` runs a smaller fleet. It leaves Postgres running; `make dev-reset` stops it and deletes its
+data.
 
 ## Quick start
 
@@ -282,12 +375,31 @@ it all and deletes its data.
 specified but not built yet. [docs/architecture.md](docs/architecture.md) shows how the pieces fit
 together, and [docs/adr](docs/adr) records the decisions.
 
-## Roadmap
+## Benchmarks
 
-None of this exists yet.
+Measured on one Apple M4 Pro laptop, with Postgres in a 4-CPU VM, and the commands to reproduce them are in
+[docs/benchmarks.md](docs/benchmarks.md):
 
-- **Scale:** load testing the paths built so far, at fleet sizes up to 10,000 devices.
-- **Release:** published benchmarks and a full bad-release demo.
+| Measure | Result |
+|---|---|
+| Fleet size | With default settings, 30,000 devices polling every minute take a staged rollout with nothing shed, and every device request served within 7 ms at p99. The limit is the burst of work when a stage opens. Past about 4,000 requests a second, rolloutd sheds the excess, and rollouts still finish. |
+| Staging | Across 10,000 devices, a release that fails everywhere reaches 7 devices with staged exposure, and 789 (7.9%) without it. |
+| Halting | From the report that crosses a limit to the halt: 2.4 s at p50 and 4.8 s at most, with the default 5-second engine interval. With 1 second: 0.55 s and 1.0 s. |
+| Resumable downloads | With 20% of responses cut off partway, devices download 1.12 times the artifact by resuming, and 8.5 times by starting over. |
+
+## Limitations
+
+- Every device is simulated. The agent writes artifacts into slots as opaque bytes, and nothing unpacks or runs
+  them.
+- Rollback restores only the release a device ran just before, from its own previous slot. It can't fetch an
+  older release.
+- One shared admin token, so every operator action is recorded as `admin`.
+- The filesystem artifact store isn't shared between rolloutd replicas, so more than one replica needs shared
+  storage behind it.
+- There's no endpoint that lists rollouts or fleets. A rollout is looked up by its ID.
+- A breach waits for the engine's next evaluation, every 5 seconds by default, so that bounds how fast a rollout
+  halts.
+- rolloutd doesn't terminate TLS, and binds to loopback unless told otherwise.
 
 Real hardware, vehicle protocols, multi-region control planes, a web UI, delta updates, and a full
 TUF implementation are out of scope.

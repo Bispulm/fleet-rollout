@@ -1,14 +1,17 @@
 # One image holds every binary: rolloutd, rollout-operator, rollout-agent, rollout-sim, and
 # rolloutctl. Each container picks its command. Both stages are pinned by digest.
 
-FROM golang:1.27.3-alpine@sha256:fa4881266890ef051f0ce63afdfaccb69bbe8186084387f4fafd60d7ecbabc71 AS build
+# The build stage runs on the builder's own platform and cross-compiles, so a multi-platform build
+# needs no emulation.
+FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine@sha256:fa4881266890ef051f0ce63afdfaccb69bbe8186084387f4fafd60d7ecbabc71 AS build
+ARG TARGETOS TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY api ./api
 COPY cmd ./cmd
 COPY internal ./internal
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/ ./cmd/...
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/ ./cmd/...
 # The distroless image has no shell to make this with. A volume mounted here starts out with
 # the directory's ownership, so the non-root user can write artifacts to it.
 RUN mkdir -p /data/var/lib/fleet-rollout/artifacts
