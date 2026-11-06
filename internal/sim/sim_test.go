@@ -179,3 +179,59 @@ func TestABadReleaseIsRolledBackWhenThePolicySaysTo(t *testing.T) {
 		t.Fatalf("%d devices still run the bad release", report.Updated)
 	}
 }
+
+// downloadScenario is one stage of every device, on a network that breaks content
+// responses partway through at the given rate.
+func downloadScenario(breakRate float64) sim.Scenario {
+	soak := rollout.Duration(time.Minute)
+	deadline := rollout.Duration(24 * time.Hour)
+	return sim.Scenario{
+		Seed: 11, Devices: 30, ArtifactBytes: 256 << 10, ChunkSize: 16 << 10,
+		Policy: rollout.PolicySpec{
+			Stages: []rollout.StageSpec{{Percent: 100, Soak: &soak, Deadline: &deadline}},
+			Safety: rollout.SafetySpec{MaxFailureBPS: new(1000)},
+		},
+		Faults: sim.Faults{Break: breakRate},
+	}
+}
+
+func TestBrokenDownloadsResumeFromTheLastVerifiedChunk(t *testing.T) {
+	t.Parallel()
+	clean := run(t, downloadScenario(0))
+	broken := run(t, downloadScenario(0.2))
+	for _, report := range []sim.Report{clean, broken} {
+		requireNoBadInstalls(t, report)
+		if report.State != rollout.StateCompleted || report.Updated != 30 {
+			t.Fatalf("state = %s, updated %d of 30", report.State, report.Updated)
+		}
+	}
+	if want := 30 * clean.ArtifactBytes; clean.BytesDownloaded != want {
+		t.Fatalf("a clean network downloaded %d bytes, want exactly %d", clean.BytesDownloaded, want)
+	}
+	if broken.Faults["break"] == 0 {
+		t.Fatal("no response was broken")
+	}
+	// A break loses at most the chunk it cut short.
+	if most := clean.BytesDownloaded + int64(broken.Faults["break"])*(16<<10); broken.BytesDownloaded <= clean.BytesDownloaded ||
+		broken.BytesDownloaded > most {
+		t.Fatalf("downloaded %d bytes with %d breaks, want more than %d and at most %d",
+			broken.BytesDownloaded, broken.Faults["break"], clean.BytesDownloaded, most)
+	}
+}
+
+func TestWithoutResumeABrokenDownloadStartsOver(t *testing.T) {
+	t.Parallel()
+	resumed := run(t, downloadScenario(0.2))
+	sc := downloadScenario(0.2)
+	sc.RestartDownloads = true
+	restarted := run(t, sc)
+	requireNoBadInstalls(t, restarted)
+	if restarted.State != rollout.StateCompleted || restarted.Updated != 30 {
+		t.Fatalf("state = %s, updated %d of 30", restarted.State, restarted.Updated)
+	}
+	// Starting over from the first chunk after a break costs far more than resuming.
+	if restarted.BytesDownloaded < 2*resumed.BytesDownloaded {
+		t.Fatalf("without resume downloaded %d bytes, with resume %d; want at least twice as many",
+			restarted.BytesDownloaded, resumed.BytesDownloaded)
+	}
+}

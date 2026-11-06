@@ -54,6 +54,10 @@ type Scenario struct {
 	ChunkSize     int64              `json:"chunk_size"`
 	Policy        rollout.PolicySpec `json:"policy"`
 	Faults        Faults             `json:"faults"`
+	// RestartDownloads makes devices behave like a client without resumable downloads: a
+	// chunk that fails throws away everything downloaded so far, and the download starts over.
+	// It exists to measure what resuming saves.
+	RestartDownloads bool `json:"restart_downloads,omitempty"`
 	// The rest only matter in deterministic mode, where the simulator runs the server.
 	PollInterval   time.Duration `json:"poll_interval,omitempty"`
 	EngineInterval time.Duration `json:"engine_interval,omitempty"`
@@ -351,10 +355,11 @@ func Run(ctx context.Context, pool *pgxpool.Pool, sc Scenario) (Report, error) {
 	}
 	env := &environment{
 		clock: clock, decide: decider{seed: sc.Seed}, faults: sc.Faults, start: clock.now,
-		config:    agent.Config{Platform: platform, Trust: trust, InitialRelease: initialRelease},
-		logger:    logger,
-		transport: transport,
-		baseURL:   base,
+		restartDownloads: sc.RestartDownloads,
+		config:           agent.Config{Platform: platform, Trust: trust, InitialRelease: initialRelease},
+		logger:           logger,
+		transport:        transport,
+		baseURL:          base,
 	}
 	devices := make([]*device, len(setup.tokens))
 	queue := make(schedule, 0, len(devices))
@@ -456,11 +461,12 @@ func RunLive(ctx context.Context, cfg LiveConfig) (Report, error) {
 
 	env := &environment{
 		clock: realClock{}, decide: decider{seed: sc.Seed}, faults: sc.Faults, start: time.Now(),
-		config:    agent.Config{Platform: platform, Trust: cfg.Trust, InitialRelease: initialRelease},
-		logger:    logger,
-		transport: transport,
-		baseURL:   cfg.APIURL,
-		live:      true,
+		restartDownloads: sc.RestartDownloads,
+		config:           agent.Config{Platform: platform, Trust: cfg.Trust, InitialRelease: initialRelease},
+		logger:           logger,
+		transport:        transport,
+		baseURL:          cfg.APIURL,
+		live:             true,
 	}
 	devices := make([]*device, len(setup.tokens))
 	for i, registered := range setup.tokens {

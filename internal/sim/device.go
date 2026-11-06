@@ -56,6 +56,8 @@ type environment struct {
 	baseURL   string
 	// live makes latency real.
 	live bool
+	// restartDownloads throws a download away whenever a chunk fails. See Scenario.
+	restartDownloads bool
 }
 
 // device is one simulated device: a real agent, and the faults around it.
@@ -84,6 +86,8 @@ type device struct {
 	crashes  int
 	bytes    int64
 	steps    int
+	// chunkFailed records that a content request failed during the current step.
+	chunkFailed bool
 }
 
 func newDevice(env *environment, id, token string, seed int64) *device {
@@ -177,7 +181,25 @@ func (d *device) step(ctx context.Context) time.Duration {
 		d.env.logger.LogAttrs(ctx, slog.LevelError, "agent step failed", slog.String("device_id", d.id), slog.Any("error", err))
 		return 30 * time.Second
 	}
+	if d.chunkFailed {
+		d.chunkFailed = false
+		if d.env.restartDownloads {
+			return d.startDownloadOver()
+		}
+	}
 	return wait
+}
+
+// startDownloadOver discards the partial download and restarts the agent, which then finds
+// less than it had verified, and starts from the first chunk.
+func (d *device) startDownloadOver() time.Duration {
+	if work := d.agent.Checkpoint().Work; work != nil {
+		if err := d.partials.Remove(work.Artifact.ID); err != nil {
+			panic(fmt.Sprintf("remove a simulated partial download: %v", err))
+		}
+	}
+	d.agent = nil
+	return 0
 }
 
 // crashed throws the agent away, and schedules its restart.
@@ -289,6 +311,7 @@ func (t *faultTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	op := operation(req.URL.Path)
 	if d.offline(d.env.clock.Now()) {
 		d.faults["offline_refusal"]++
+		d.noteChunkFailure(op)
 		return nil, errOffline
 	}
 	if d.env.live && f.Latency > 0 {
@@ -301,6 +324,7 @@ func (t *faultTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	if d.hit(op+"-drop", f.Drop) {
 		d.faults["drop"]++
+		d.noteChunkFailure(op)
 		return nil, errDropped
 	}
 	if op == "report" {
@@ -317,6 +341,7 @@ func (t *faultTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	resp, err := t.next.RoundTrip(req)
 	if err != nil {
+		d.noteChunkFailure(op)
 		return nil, err
 	}
 	if resp.StatusCode == http.StatusServiceUnavailable {
@@ -325,20 +350,35 @@ func (t *faultTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if d.hit(op+"-lost", f.LostResponse) {
 		_ = resp.Body.Close()
 		d.faults["lost_response"]++
+		d.noteChunkFailure(op)
 		return nil, errResponseLost
 	}
 	if op == "content" && resp.StatusCode < http.StatusMultipleChoices {
 		switch {
 		case d.hit("content-corrupt", f.Corrupt):
 			d.faults["corrupt"]++
+			d.chunkFailed = true
 			resp.Body = &corruptingBody{body: resp.Body, at: int64(d.env.decide.value(d.id, "corrupt-at", d.faults["corrupt"]) * 1024)}
 		case d.hit("content-truncate", f.Truncate):
 			d.faults["truncate"]++
+			d.chunkFailed = true
 			resp.Body = &truncatedBody{body: resp.Body, remaining: int64(d.env.decide.value(d.id, "truncate-at", d.faults["truncate"]) * 1024)}
+		case d.hit("content-break", f.Break):
+			d.faults["break"]++
+			d.chunkFailed = true
+			at := d.env.decide.value(d.id, "break-at", d.faults["break"]) * float64(max(resp.ContentLength, 0))
+			resp.Body = &truncatedBody{body: resp.Body, remaining: int64(at)}
 		}
 		resp.Body = &countingBody{body: resp.Body, device: d}
 	}
 	return resp, nil
+}
+
+// noteChunkFailure records that a request for content failed, or will.
+func (d *device) noteChunkFailure(op string) {
+	if op == "content" {
+		d.chunkFailed = true
+	}
 }
 
 // noteFailure records why the device says it failed, if it does.

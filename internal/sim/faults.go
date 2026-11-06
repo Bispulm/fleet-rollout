@@ -25,6 +25,10 @@ type Faults struct {
 	Corrupt float64 `json:"corrupt"`
 	// Truncate cuts a download off partway through.
 	Truncate float64 `json:"truncate"`
+	// Break cuts a download off at a random point anywhere in the response, as a connection
+	// dropping mid-transfer would. Unlike Truncate, which cuts within the first kilobyte, it
+	// can lose most of a chunk.
+	Break float64 `json:"break,omitempty"`
 	// DuplicateReport delivers a report twice.
 	DuplicateReport float64 `json:"duplicate_report"`
 	// Crash kills the agent at a durable-state or install boundary. It restarts from what
