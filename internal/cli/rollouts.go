@@ -236,6 +236,10 @@ func (a *app) rolloutStatusCommand() *cobra.Command {
 	return cmd
 }
 
+// watchFailures is how many checks in a row may fail, for reasons that might pass, before a
+// watch gives up.
+const watchFailures = 30
+
 // watchRollout prints a line each time the rollout changes, until it reaches a state that
 // only a person can move it on from, and then its full status. It fails unless the rollout
 // completed, so that a script can wait on it.
@@ -245,10 +249,12 @@ func (a *app) watchRollout(ctx context.Context, c *client.Client, id string, int
 	}
 	var r apiv1.Rollout
 	var last string
+	failures := 0
 	for {
 		found, err := c.GetRollout(ctx, id)
 		switch {
 		case err == nil:
+			failures = 0
 			r = found
 			if line := progressLine(r); line != last {
 				last = line
@@ -261,8 +267,13 @@ func (a *app) watchRollout(ctx context.Context, c *client.Client, id string, int
 			}
 		case !client.IsRetryable(err):
 			return err
+		default:
+			// A failure that might pass, such as the server shedding load, is tried again, but
+			// not forever, or a server that's gone would leave the watch waiting silently.
+			if failures++; failures >= watchFailures {
+				return fmt.Errorf("no answer from the control plane after %d tries: %w", failures, err)
+			}
 		}
-		// A retryable failure, such as the server shedding load, is tried again next time.
 		select {
 		case <-ctx.Done():
 			return ctx.Err()

@@ -672,3 +672,18 @@ func TestStatusWatchFollowsARolloutUntilItStops(t *testing.T) {
 		t.Errorf("the watch should end with the full status:\n%s", got.out)
 	}
 }
+
+func TestStatusWatchGivesUpWhenTheServerStopsAnswering(t *testing.T) {
+	t.Parallel()
+	gone := httptest.NewServer(nil)
+	gone.Close()
+	vars := map[string]string{"ROLLOUT_API_URL": gone.URL, "ROLLOUT_ADMIN_TOKEN": adminToken}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var stdout, stderr bytes.Buffer
+	err := cli.Execute(ctx, []string{"rollout", "status", "11111111-1111-4111-8111-111111111111", "--watch", "--interval", "5ms"},
+		&stdout, &stderr, func(k string) string { return vars[k] })
+	if err == nil || ctx.Err() != nil || !strings.Contains(err.Error(), "no answer") {
+		t.Fatalf("err = %v, want the watch to give up on its own", err)
+	}
+}
