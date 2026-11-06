@@ -442,6 +442,9 @@ type LiveConfig struct {
 	Trust  signing.TrustSet
 	// Progress, if set, gets a line about the rollout every second.
 	Progress io.Writer
+	// MaxConns bounds the connections every simulated device shares, 64 if unset. Real devices
+	// each have their own, so a large fleet needs more to put its real load on the server.
+	MaxConns int
 }
 
 // RunLive simulates a scenario in real time, one goroutine per device, over real HTTP. Each
@@ -451,7 +454,11 @@ func RunLive(ctx context.Context, cfg LiveConfig) (Report, error) {
 	sc := cfg.Scenario
 	sc.defaults()
 	logger := slog.New(slog.DiscardHandler)
-	transport := &http.Transport{MaxIdleConnsPerHost: 64, MaxConnsPerHost: 64, IdleConnTimeout: 30 * time.Second}
+	conns := cfg.MaxConns
+	if conns <= 0 {
+		conns = 64
+	}
+	transport := &http.Transport{MaxIdleConnsPerHost: conns, MaxConnsPerHost: conns, IdleConnTimeout: 30 * time.Second}
 	defer transport.CloseIdleConnections()
 	admin := client.New(cfg.APIURL, cfg.AdminToken, &http.Client{Transport: transport})
 	setup, err := setUp(ctx, admin, sc, cfg.Signer)

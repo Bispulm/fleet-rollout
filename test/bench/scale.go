@@ -40,10 +40,13 @@ type scaleResult struct {
 	Shed     int       `json:"shed"`
 	Errors   int       `json:"errors"`
 	Rolloutd procUsage `json:"rolloutd"`
-	// SimulatorCPU is what the simulated devices used, on the same machine.
-	SimulatorCPU time.Duration `json:"simulator_cpu"`
-	Postgres     postgresLoad  `json:"postgres"`
-	Pass         bool          `json:"pass"`
+	// SimulatorCPU is what the simulated devices used, on the same machine, and SimulatorRSSMB
+	// the benchmark process's peak memory so far, which the devices are most of.
+	SimulatorCPU   time.Duration `json:"simulator_cpu"`
+	SimulatorRSSMB float64       `json:"simulator_peak_rss_mb"`
+	ClientConns    int           `json:"client_conns"`
+	Postgres       postgresLoad  `json:"postgres"`
+	Pass           bool          `json:"pass"`
 }
 
 type postgresLoad struct {
@@ -69,6 +72,7 @@ func runScale(ctx context.Context, args []string, getenv func(string) string, st
 	slo := flags.Duration("p99", 100*time.Millisecond, "p99 latency a device route must stay under for a size to pass")
 	container := flags.String("postgres-container", "fleet-rollout-postgres-1", "Docker container running Postgres, for its CPU use")
 	keepGoing := flags.Bool("keep-going", false, "run every size even after one fails")
+	conns := flags.Int("client-conns", 1024, "connections the simulated devices share; too few caps the load they can make")
 	out := flags.String("json", "", "also write the results to this file as JSON")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -91,7 +95,7 @@ func runScale(ctx context.Context, args []string, getenv func(string) string, st
 	env := map[string]string{"ROLLOUTD_POLL_INTERVAL": pollInterval.String()}
 	var results []scaleResult
 	for _, devices := range fleetSizes {
-		r, err := scaleRun(ctx, *binary, serverURL, dir, env, *container, devices, *soak)
+		r, err := scaleRun(ctx, *binary, serverURL, dir, env, *container, devices, *soak, *conns)
 		if err != nil {
 			return fmt.Errorf("%d devices: %w", devices, err)
 		}
@@ -111,7 +115,8 @@ func runScale(ctx context.Context, args []string, getenv func(string) string, st
 	m.LoadTo = loadAverage()
 
 	_, _ = fmt.Fprintf(stdout, "Scale: a staged rollout (10%%, 25%%, 50%%, 100%%, %s soaks) on live simulated fleets, devices "+
-		"polling every %s, rolloutd with default settings, everything on one machine.\n", *soak, *pollInterval)
+		"polling every %s over %d shared connections, rolloutd with default settings, everything on one machine.\n",
+		*soak, *pollInterval, *conns)
 	printMachine(stdout, m)
 	_, _ = fmt.Fprintln(stdout)
 	rows := make([][]string, 0, len(results))
@@ -152,7 +157,9 @@ func latencies(stats *routeStats) string {
 	return formatMillis(stats.P50) + " / " + formatMillis(stats.P95) + " / " + formatMillis(stats.P99)
 }
 
-func scaleRun(ctx context.Context, binary, databaseServer, dir string, env map[string]string, container string, devices int, soak time.Duration) (scaleResult, error) {
+func scaleRun(ctx context.Context, binary, databaseServer, dir string, env map[string]string, container string, devices int,
+	soak time.Duration, conns int,
+) (scaleResult, error) {
 	srv, err := startServer(ctx, binary, databaseServer, dir, env)
 	if err != nil {
 		return scaleResult{}, err
@@ -177,7 +184,7 @@ func scaleRun(ctx context.Context, binary, databaseServer, dir string, env map[s
 			},
 			MaxDuration: 30 * time.Minute,
 		},
-		APIURL: srv.URL, AdminToken: srv.Token, Signer: srv.Signer, Trust: srv.Trust,
+		APIURL: srv.URL, AdminToken: srv.Token, Signer: srv.Signer, Trust: srv.Trust, MaxConns: conns,
 	})
 	cpuMean, cpuPeak := sampler.stop()
 	simulatorCPU := selfCPU() - cpuBefore
@@ -201,7 +208,8 @@ func scaleRun(ctx context.Context, binary, databaseServer, dir string, env map[s
 
 	r := scaleResult{
 		Devices: devices, State: report.State, TimedOut: report.TimedOut, Elapsed: report.Elapsed, Routes: map[string]*routeStats{},
-		Rolloutd: used, SimulatorCPU: simulatorCPU, Shed: report.Faults["shed"],
+		Rolloutd: used, SimulatorCPU: simulatorCPU, Shed: report.Faults["shed"], SimulatorRSSMB: selfMaxRSS(),
+		ClientConns: conns,
 	}
 	for _, route := range deviceRoutes {
 		if stats := routes[route]; stats != nil {
@@ -244,6 +252,14 @@ func readPostgresStats(ctx context.Context, dbURL string) (postgresStats, error)
 	err = conn.QueryRow(ctx, `SELECT xact_commit, tup_inserted + tup_updated + tup_deleted, tup_returned, blks_hit, blks_read
 		FROM pg_stat_database WHERE datname = current_database()`).Scan(&s.commits, &s.written, &s.read, &s.hits, &s.reads)
 	return s, err
+}
+
+func selfMaxRSS() float64 {
+	var r syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &r); err != nil {
+		return 0
+	}
+	return maxRSSMegabytes(&r)
 }
 
 func selfCPU() time.Duration {
