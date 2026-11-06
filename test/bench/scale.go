@@ -171,9 +171,22 @@ func runScale(ctx context.Context, args []string, getenv func(string) string, st
 	_, _ = fmt.Fprintf(stdout, "\nLargest fleet that completed with nothing shed, no errors, and every device route under %s at p99: %d devices.\n",
 		*slo, largest)
 	return writeJSON(*out, struct {
-		Machine machine       `json:"machine"`
-		Results []scaleResult `json:"results"`
-	}{m, results})
+		Machine  machine       `json:"machine"`
+		Settings scaleSettings `json:"settings"`
+		Results  []scaleResult `json:"results"`
+	}{m, scaleSettings{
+		PollInterval: *pollInterval, Soak: *soak, ClientConns: *conns, StartWithin: *startWithin, RolloutdEnv: env,
+	}, results})
+}
+
+// scaleSettings records what a scale run was configured with, so results can be read without
+// knowing the command.
+type scaleSettings struct {
+	PollInterval time.Duration     `json:"poll_interval"`
+	Soak         time.Duration     `json:"soak"`
+	ClientConns  int               `json:"client_conns"`
+	StartWithin  time.Duration     `json:"start_within"`
+	RolloutdEnv  map[string]string `json:"rolloutd_env"`
 }
 
 func copyFile(from, to string) error {
