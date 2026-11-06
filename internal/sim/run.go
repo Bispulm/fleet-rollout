@@ -445,6 +445,10 @@ type LiveConfig struct {
 	// MaxConns bounds the connections every simulated device shares, 64 if unset. Real devices
 	// each have their own, so a large fleet needs more to put its real load on the server.
 	MaxConns int
+	// StartWithin spreads the devices' first requests over this long, a second if unset. Devices
+	// that have run for a while poll at times spread over the whole poll interval, while devices
+	// that all came back at once poll together, and keep doing so for a while.
+	StartWithin time.Duration
 }
 
 // RunLive simulates a scenario in real time, one goroutine per device, over real HTTP. Each
@@ -469,6 +473,7 @@ func RunLive(ctx context.Context, cfg LiveConfig) (Report, error) {
 	env := &environment{
 		clock: realClock{}, decide: decider{seed: sc.Seed}, faults: sc.Faults, start: time.Now(),
 		restartDownloads: sc.RestartDownloads,
+		startWithin:      cfg.StartWithin,
 		config:           agent.Config{Platform: platform, Trust: cfg.Trust, InitialRelease: initialRelease},
 		logger:           logger,
 		transport:        transport,
@@ -530,8 +535,7 @@ func RunLive(ctx context.Context, cfg LiveConfig) (Report, error) {
 func runDevices(ctx context.Context, wg *sync.WaitGroup, devices []*device, quiet []atomic.Bool) {
 	for i, d := range devices {
 		wg.Go(func() {
-			// Devices don't all start at the same instant.
-			wait := time.Duration(d.env.decide.value(d.id, "start", 0) * float64(time.Second))
+			wait := d.startDelay()
 			for {
 				select {
 				case <-ctx.Done():

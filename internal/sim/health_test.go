@@ -3,6 +3,7 @@ package sim
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -55,5 +56,29 @@ func TestOnlyTheBadReleaseFailsItsHealthCheck(t *testing.T) {
 	env.faults.UnhealthyRelease = 0
 	if err := check(installing(2), "slot-b"); err == nil {
 		t.Error("with no release named, release 2 should fail too")
+	}
+}
+
+func TestDevicesStartSpreadOverTheWindowTheyAreGiven(t *testing.T) {
+	env := &environment{clock: realClock{}, decide: decider{seed: 1}, start: time.Now()}
+	for _, within := range []time.Duration{0, 10 * time.Second} {
+		env.startWithin = within
+		limit := within
+		if limit == 0 {
+			limit = time.Second // the default
+		}
+		var latest time.Duration
+		for i := range 500 {
+			d := newDevice(env, fmt.Sprintf("dev-%d", i), "token", 1)
+			delay := d.startDelay()
+			if delay < 0 || delay >= limit {
+				t.Fatalf("within %s: delay %s is outside [0, %s)", within, delay, limit)
+			}
+			latest = max(latest, delay)
+		}
+		// 500 devices spread evenly come close to the end of the window.
+		if latest < limit*9/10 {
+			t.Errorf("within %s: the latest start was %s, so starts aren't spread over the window", within, latest)
+		}
 	}
 }

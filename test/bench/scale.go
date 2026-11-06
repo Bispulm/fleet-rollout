@@ -73,6 +73,8 @@ func runScale(ctx context.Context, args []string, getenv func(string) string, st
 	container := flags.String("postgres-container", "fleet-rollout-postgres-1", "Docker container running Postgres, for its CPU use")
 	keepGoing := flags.Bool("keep-going", false, "run every size even after one fails")
 	conns := flags.Int("client-conns", 1024, "connections the simulated devices share; too few caps the load they can make")
+	startWithin := flags.Duration("start-within", 0, "spread the devices' first requests over this long (default: the poll interval, "+
+		"a fleet in its steady state); a short spread is a fleet reconnecting all at once")
 	out := flags.String("json", "", "also write the results to this file as JSON")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -85,6 +87,9 @@ func runScale(ctx context.Context, args []string, getenv func(string) string, st
 	if err != nil {
 		return err
 	}
+	if *startWithin <= 0 {
+		*startWithin = *pollInterval
+	}
 	dir, err := os.MkdirTemp("", "fleet-rollout-bench-")
 	if err != nil {
 		return err
@@ -95,7 +100,7 @@ func runScale(ctx context.Context, args []string, getenv func(string) string, st
 	env := map[string]string{"ROLLOUTD_POLL_INTERVAL": pollInterval.String()}
 	var results []scaleResult
 	for _, devices := range fleetSizes {
-		r, err := scaleRun(ctx, *binary, serverURL, dir, env, *container, devices, *soak, *conns)
+		r, err := scaleRun(ctx, *binary, serverURL, dir, env, *container, devices, *soak, *conns, *startWithin)
 		if err != nil {
 			return fmt.Errorf("%d devices: %w", devices, err)
 		}
@@ -115,8 +120,8 @@ func runScale(ctx context.Context, args []string, getenv func(string) string, st
 	m.LoadTo = loadAverage()
 
 	_, _ = fmt.Fprintf(stdout, "Scale: a staged rollout (10%%, 25%%, 50%%, 100%%, %s soaks) on live simulated fleets, devices "+
-		"polling every %s over %d shared connections, rolloutd with default settings, everything on one machine.\n",
-		*soak, *pollInterval, *conns)
+		"polling every %s over %d shared connections, first requests spread over %s, rolloutd with default settings, "+
+		"everything on one machine.\n", *soak, *pollInterval, *conns, *startWithin)
 	printMachine(stdout, m)
 	_, _ = fmt.Fprintln(stdout)
 	rows := make([][]string, 0, len(results))
@@ -158,7 +163,7 @@ func latencies(stats *routeStats) string {
 }
 
 func scaleRun(ctx context.Context, binary, databaseServer, dir string, env map[string]string, container string, devices int,
-	soak time.Duration, conns int,
+	soak time.Duration, conns int, startWithin time.Duration,
 ) (scaleResult, error) {
 	srv, err := startServer(ctx, binary, databaseServer, dir, env)
 	if err != nil {
@@ -185,6 +190,7 @@ func scaleRun(ctx context.Context, binary, databaseServer, dir string, env map[s
 			MaxDuration: 30 * time.Minute,
 		},
 		APIURL: srv.URL, AdminToken: srv.Token, Signer: srv.Signer, Trust: srv.Trust, MaxConns: conns,
+		StartWithin: startWithin,
 	})
 	cpuMean, cpuPeak := sampler.stop()
 	simulatorCPU := selfCPU() - cpuBefore

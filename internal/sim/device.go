@@ -58,6 +58,8 @@ type environment struct {
 	live bool
 	// restartDownloads throws a download away whenever a chunk fails. See Scenario.
 	restartDownloads bool
+	// startWithin spreads live devices' first steps over this long, a second if it's zero.
+	startWithin time.Duration
 }
 
 // device is one simulated device: a real agent, and the faults around it.
@@ -188,6 +190,16 @@ func (d *device) step(ctx context.Context) time.Duration {
 		}
 	}
 	return wait
+}
+
+// startDelay is how long a live device waits before its first step, so that devices don't all
+// start at the same instant.
+func (d *device) startDelay() time.Duration {
+	within := d.env.startWithin
+	if within <= 0 {
+		within = time.Second
+	}
+	return time.Duration(d.env.decide.value(d.id, "start", 0) * float64(within))
 }
 
 // startDownloadOver discards the partial download and restarts the agent, which then finds
