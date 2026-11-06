@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"syscall"
 	"time"
 
@@ -38,6 +39,9 @@ type server struct {
 	logFile *os.File
 	drop    func() error
 	started time.Time
+	// exited closes when the process exits, after which waitErr holds how.
+	exited  chan struct{}
+	waitErr error
 }
 
 // procUsage is what a stopped rolloutd used.
@@ -104,6 +108,10 @@ func (s *server) start(ctx context.Context, binary, dir string, env map[string]s
 		"ROLLOUTD_METRICS_ADDR":    "off",
 	}
 	maps.Copy(settings, env)
+	// Something else answering on the port would pass the readiness check below.
+	if answers(ctx, s.URL+"/readyz") {
+		return fmt.Errorf("something is already serving %s; stop it first", benchAddr)
+	}
 	s.LogPath = filepath.Join(dir, "rolloutd.log")
 	if s.logFile, err = os.Create(s.LogPath); err != nil {
 		return err
@@ -119,58 +127,120 @@ func (s *server) start(ctx context.Context, binary, dir string, env map[string]s
 		return fmt.Errorf("start rolloutd: %w", err)
 	}
 	s.started = time.Now()
-	return s.waitReady(ctx)
+	s.exited = make(chan struct{})
+	go func() {
+		s.waitErr = s.cmd.Wait()
+		close(s.exited)
+	}()
+	if err := s.waitReady(ctx); err != nil {
+		s.kill()
+		return fmt.Errorf("%w\nrolloutd's log ends:\n%s", err, logTail(s.LogPath, 15))
+	}
+	return nil
 }
 
 func (s *server) waitReady(ctx context.Context) error {
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.URL+"/readyz", nil)
-		if err != nil {
-			return err
-		}
-		if resp, err := http.DefaultClient.Do(req); err == nil {
-			_ = resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				return nil
-			}
+		if answersOK(ctx, s.URL+"/readyz") {
+			return nil
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-s.exited:
+			return fmt.Errorf("rolloutd exited before it was ready: %w", s.waitErr)
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
-	return fmt.Errorf("rolloutd wasn't ready within 30s; see %s", s.LogPath)
+	return errors.New("rolloutd wasn't ready within 30s")
+}
+
+// kill stops the process at once, if it's still running.
+func (s *server) kill() {
+	if s.exited == nil {
+		return
+	}
+	select {
+	case <-s.exited:
+	default:
+		_ = s.cmd.Process.Kill()
+		<-s.exited
+	}
+}
+
+// answers reports whether anything answers HTTP at url.
+func answers(ctx context.Context, url string) bool {
+	_, ok := get(ctx, url)
+	return ok
+}
+
+// answersOK reports whether url answers 200.
+func answersOK(ctx context.Context, url string) bool {
+	status, ok := get(ctx, url)
+	return ok && status == http.StatusOK
+}
+
+func get(ctx context.Context, url string) (int, bool) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return 0, false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, false
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode, true
+}
+
+// logTail returns the last lines of a log, which is deleted with the benchmark's directory, so
+// errors carry what it said.
+func logTail(path string, lines int) string {
+	data, err := os.ReadFile(path) //nolint:gosec // The benchmark's own log.
+	if err != nil {
+		return "(unreadable: " + err.Error() + ")"
+	}
+	all := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	return strings.Join(all[max(0, len(all)-lines):], "\n")
 }
 
 // stop shuts rolloutd down and reports what it used. The database stays, for analysis, until
 // cleanUp.
 func (s *server) stop() (procUsage, error) {
-	if s.cmd == nil || s.cmd.Process == nil {
+	if s.exited == nil {
 		return procUsage{}, errors.New("rolloutd isn't running")
+	}
+	select {
+	case <-s.exited:
+		return procUsage{}, fmt.Errorf("rolloutd exited during the run: %w\nits log ends:\n%s", s.waitErr, logTail(s.LogPath, 15))
+	default:
 	}
 	if err := s.cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		return procUsage{}, err
 	}
-	err := s.cmd.Wait()
+	<-s.exited
 	elapsed := time.Since(s.started)
 	_ = s.logFile.Close()
 	state := s.cmd.ProcessState
 	if state == nil {
-		return procUsage{}, fmt.Errorf("rolloutd: %w", err)
+		return procUsage{}, fmt.Errorf("rolloutd: %w", s.waitErr)
 	}
 	u := procUsage{CPU: state.UserTime() + state.SystemTime(), Elapsed: elapsed}
 	if rusage, ok := state.SysUsage().(*syscall.Rusage); ok {
 		u.MaxRSSMB = maxRSSMegabytes(rusage)
 	}
 	if !state.Success() {
-		return u, fmt.Errorf("rolloutd exited with %s; see %s", state, s.LogPath)
+		return u, fmt.Errorf("rolloutd exited with %s; its log ends:\n%s", state, logTail(s.LogPath, 15))
 	}
 	return u, nil
 }
 
+// cleanUp kills rolloutd if it's still running, and drops its database.
 func (s *server) cleanUp() error {
+	s.kill()
 	if s.logFile != nil {
 		_ = s.logFile.Close()
 	}
